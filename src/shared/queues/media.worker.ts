@@ -1,8 +1,7 @@
 import { Worker, Job } from "bullmq";
-import fs from "fs/promises";
-import path from "path";
 import logger from "@config/logger";
 import env from "@config/env";
+import { v2 as cloudinary } from "cloudinary";
 
 // Parse the REDIS_URL from env.ts to extract host and port for BullMQ
 const redisUrl = new URL(env.REDIS_URL);
@@ -12,32 +11,50 @@ const redisConnectionOptions = {
   password: env.REDIS_PASSWORD || redisUrl.password || undefined,
 };
 
+// Cloudinary client
+cloudinary.config({
+  cloud_name: env.CLOUDINARY_CLOUD_NAME,
+  api_key: env.CLOUDINARY_API_KEY,
+  api_secret: env.CLOUDINARY_API_SECRET,
+});
+
+interface MediaCleanupJobData {
+  publicIds: string[];
+}
+
 export const mediaWorker = new Worker(
   "media-cleanup",
-  async (job: Job) => {
-    // Explicit, safe typing
-    const { fileUrls } = job.data as { fileUrls: string[] };
+  async (job: Job<MediaCleanupJobData>) => {
+    const { publicIds } = job.data;
 
-    for (const fileUrl of fileUrls) {
+    if (!Array.isArray(publicIds) || publicIds.length === 0) {
+      logger.warn(`Media cleanup job ${job.id} received no publicIds`);
+      return;
+    }
+
+    for (const publicId of publicIds) {
+      if (!publicId || publicId.startsWith("http")) {
+        // Guard: refuse to process raw URLs — they were never valid inputs.
+        logger.warn(
+          `Media cleanup skipped invalid public_id (looks like a URL): ${publicId}`,
+        );
+        continue;
+      }
+
       try {
-        if (fileUrl.startsWith("/uploads/")) {
-          const absolutePath = path.join(process.cwd(), fileUrl);
-          await fs.unlink(absolutePath);
-          logger.info(`Successfully deleted orphaned media: ${fileUrl}`);
-        }
+        await cloudinary.uploader.destroy(publicId);
+        logger.info(`Cloudinary destroy succeeded for public_id: ${publicId}`);
       } catch (error: unknown) {
-        // 100% Type-Safe Node error casting
-        const err = error as NodeJS.ErrnoException;
-        if (err.code !== 'ENOENT') { 
-          logger.error(`Failed to delete media ${fileUrl}:`, err);
-        }
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.error(`Failed to delete Cloudinary asset ${publicId}:`, err);
+        // Rethrow so BullMQ retries the whole job per the queue's backoff config.
+        throw err;
       }
     }
   },
-  { connection: redisConnectionOptions }
+  { connection: redisConnectionOptions },
 );
 
-// Type-safe error listener
 mediaWorker.on("failed", (job: Job | undefined, err: Error) => {
   logger.error(`Media cleanup job ${job?.id} failed:`, err);
 });
