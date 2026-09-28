@@ -1,122 +1,139 @@
-import multer, { FileFilterCallback } from "multer";
-import multerS3 from "multer-s3";
-import { S3Client } from "@aws-sdk/client-s3";
+import multer, { FileFilterCallback, StorageEngine } from "multer";
+import {
+  v2 as cloudinary,
+  UploadApiErrorResponse,
+  UploadApiResponse,
+} from "cloudinary";
 import path from "path";
-import fs from "fs";
 import { Request } from "express";
-import { AppError } from "../utils/app.error";
-import { HTTP_STATUS } from "../constants/http-codes";
+import { AppError } from "@shared/utils/app.error";
+import { HTTP_STATUS } from "@shared/constants/http-codes";
 import env from "@config/env";
+import type { CloudinaryFileFields } from "@shared/types/cloudinary-file";
 
 /**
  * @module UploadMiddleware
- * @description Configures Multer with Amazon S3 storage for handling file uploads.
- * Supports multi-file uploads, validates file types (images only), and enforces size limits.
+ * @description Configures Multer with Cloudinary storage.
+ * Supports multi-file uploads, validates image types, and enforces size limits.
  */
 
-// 1. Configure AWS S3 Client using AWS SDK v3
-const s3 = new S3Client({
-  region: env.AWS_REGION || "us-east-1",
-  credentials: {
-    accessKeyId: env.AWS_ACCESS_KEY_ID || "dummy-key",
-    secretAccessKey: env.AWS_SECRET_ACCESS_KEY || "dummy-secret",
-  },
+// 1. Configure Cloudinary client
+cloudinary.config({
+  cloud_name: env.CLOUDINARY_CLOUD_NAME,
+  api_key: env.CLOUDINARY_API_KEY,
+  api_secret: env.CLOUDINARY_API_SECRET,
 });
 
 /**
  * File filter to restrict uploads to allowed image types.
- * @param {Request} req - Express request object.
- * @param {Express.Multer.File} file - Uploaded file object.
- * @param {FileFilterCallback} cb - Callback to accept or reject the file.
  */
 const fileFilter = (
   req: Request,
   file: Express.Multer.File,
   cb: FileFilterCallback,
-) => {
+): void => {
   const filetypes = /jpeg|jpg|png|gif|webp/;
   const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
   const mimetype = filetypes.test(file.mimetype);
 
   if (mimetype && extname) {
-    return cb(null, true);
-  } else {
-    // Pass an error to the callback if the file type is invalid
-    cb(
-      new AppError(
-        HTTP_STATUS.BAD_REQUEST,
-        "Invalid file type. Only JPEG, JPG, PNG, GIF, and WEBP images are allowed.",
-      ),
-    );
+    cb(null, true);
+    return;
   }
+
+  cb(
+    new AppError(
+      HTTP_STATUS.BAD_REQUEST,
+      "Invalid file type. Only JPEG, JPG, PNG, GIF, and WEBP images are allowed.",
+    ),
+  );
 };
 
 /**
- * Multer S3 Storage Engine Configuration.
- * Defines how and where files are stored in the S3 bucket.
+ * Custom Multer storage engine that streams uploads to Cloudinary.
  */
-const s3Storage = multerS3({
-  s3: s3,
-  bucket: env.AWS_BUCKET_NAME || "dummy-bucket",
-  contentType: multerS3.AUTO_CONTENT_TYPE, // Automatically detect and set content-type
-  metadata: function (
+class CloudinaryStorageEngine implements StorageEngine {
+  _handleFile(
     req: Request,
     file: Express.Multer.File,
-    cb: (error: Error | null, metadata?: Record<string, string>) => void,
-  ) {
-    cb(null, { fieldName: file.fieldname });
-  },
-  key: function (
-    req: Request,
-    file: Express.Multer.File,
-    cb: (error: Error | null, key?: string) => void,
-  ) {
-    // Folder structure strategy: uploads/users/{userId}/{timestamp}-{sanitizedFilename}
-    // Utilizing req.user safely thanks to express.d.ts augmentation
+    callback: (
+      error?: Error | null,
+      info?: Partial<Express.Multer.File> & CloudinaryFileFields,
+    ) => void,
+  ): void {
     const userId = req.user?.id || "anonymous";
     const timestamp = Date.now();
-    // Sanitize filename: replace spaces with dashes and convert to lowercase
+
     const cleanName = file.originalname
       .replace(/\s+/g, "-")
       .replace(/[^a-zA-Z0-9.\-_]/g, "")
       .toLowerCase();
 
-    const fullPath = `uploads/users/${userId}/${timestamp}-${cleanName}`;
-    cb(null, fullPath);
-  },
-});
+    const folder = `uploads/users/${userId}`;
+    const publicId = `${timestamp}-${cleanName}`;
 
-const localUploadDir = "uploads/";
-if (!fs.existsSync(localUploadDir)) {
-  fs.mkdirSync(localUploadDir, { recursive: true });
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        public_id: publicId,
+        resource_type: "auto",
+      },
+      (
+        error: UploadApiErrorResponse | undefined,
+        result: UploadApiResponse | undefined,
+      ): void => {
+        if (error || !result) {
+          callback(
+            error
+              ? new Error(error.message)
+              : new Error("Cloudinary upload failed"),
+          );
+          return;
+        }
+
+        callback(null, {
+          path: result.secure_url,
+          filename: result.public_id,
+          size: result.bytes,
+          location: result.secure_url,
+          key: result.public_id,
+          public_id: result.public_id,
+          secure_url: result.secure_url,
+        });
+      },
+    );
+
+    file.stream.pipe(uploadStream);
+  }
+
+  _removeFile(
+    req: Request,
+    file: Express.Multer.File & Partial<CloudinaryFileFields>,
+    callback: (error: Error | null) => void,
+  ): void {
+    const publicId = file.public_id || file.filename;
+
+    if (!publicId) {
+      callback(null);
+      return;
+    }
+
+    cloudinary.uploader.destroy(
+      publicId,
+      (error: UploadApiErrorResponse | null): void => {
+        callback(error ? new Error(error.message) : null);
+      },
+    );
+  }
 }
-/**
- * When we are working locally ...
- */
-// const localStorage = multer.diskStorage({
-//   destination: function (req: Request, file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) {
-//     cb(null, localUploadDir);
-//   },
-//   filename: function (req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) {
-//     const userId = req.user?.id || "anonymous";
-//     const cleanName = file.originalname
-//       .replace(/\s+/g, "-")
-//       .replace(/[^a-zA-Z0-9.\-_]/g, "")
-//       .toLowerCase();
-//     cb(null, `${userId}-${Date.now()}-${cleanName}`);
-//   }
-// });
 
-/**
- * Exported Multer Instance.
- * Use this middleware in routes to handle 'multipart/form-data'.
- * Example: router.post('/upload', upload.array('images', 5), controller.handleUpload);
- */
+const cloudinaryStorage = new CloudinaryStorageEngine();
+
 export const upload = multer({
-  storage: s3Storage, 
+  storage: cloudinaryStorage,
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB limit per file
-    files: 5, // Limit max number of files per upload to 5 (prevent DoS)
+    fileSize: env.MAX_FILE_SIZE_MB * 1024 * 1024,
+    files: env.MAX_FILES_PER_UPLOAD,
   },
-  fileFilter: fileFilter,
+  fileFilter,
 });
