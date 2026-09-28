@@ -25,6 +25,13 @@ const SALT_ROUNDS = 12;
 
 function toPublicUser(user: typeof users.$inferSelect): PublicUser {
   const { passwordHash, googleAuth, githubAuth, ...publicFields } = user;
+
+  // Intentionally omitted from the public response — reference them so the
+  // unused-vars rule doesn't fire on the destructuring pattern.
+  void passwordHash;
+  void googleAuth;
+  void githubAuth;
+
   return publicFields as unknown as PublicUser;
 }
 
