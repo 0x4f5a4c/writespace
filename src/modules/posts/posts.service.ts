@@ -16,6 +16,7 @@ import { addMediaCleanupJob } from "@shared/queues/media.queue";
 
 interface CoverImageData {
   url: string;
+  publicId: string;
   altText?: string;
   credit?: string;
 }
@@ -25,21 +26,32 @@ class PostService {
     authorId: string,
     data: CreatePostInput & {
       media?: string[];
+      mediaPublicIds?: string[];
       codeSnippets?: CodeSnippetSchema[];
-      coverImage?: CoverImageData; 
+      coverImage?: CoverImageData;
     },
   ): Promise<Awaited<ReturnType<typeof this.getPost>>> {
     const cleanContent = this.sanitizeContent(data.content);
     const slug = await this.generateUniqueSlug(data.title);
-    const excerpt = data.subtitle || cleanContent.substring(0, 150) + "..." || "";
+    const excerpt =
+      data.subtitle || cleanContent.substring(0, 150) + "..." || "";
     const readTime = this.calculateReadTime(cleanContent);
 
     let newPostId: string;
 
     await db.transaction(async (tx) => {
-      const mediaValue = data.media && data.media.length > 0 ? data.media : undefined;
-      const tagsValue = data.tags && data.tags.length > 0 ? data.tags : undefined;
-      const codeSnippetsValue = data.codeSnippets && data.codeSnippets.length > 0 ? data.codeSnippets : undefined;
+      const mediaValue =
+        data.media && data.media.length > 0 ? data.media : undefined;
+      const mediaPublicIdsValue =
+        data.mediaPublicIds && data.mediaPublicIds.length > 0
+          ? data.mediaPublicIds
+          : undefined;
+      const tagsValue =
+        data.tags && data.tags.length > 0 ? data.tags : undefined;
+      const codeSnippetsValue =
+        data.codeSnippets && data.codeSnippets.length > 0
+          ? data.codeSnippets
+          : undefined;
 
       const [created] = await tx
         .insert(posts)
@@ -53,10 +65,12 @@ class PostService {
           readTime,
           tags: tagsValue,
           media: mediaValue,
+          mediaPublicIds: mediaPublicIdsValue,
           codeSnippets: codeSnippetsValue,
           coverImageUrl: data.coverImage?.url,
+          coverImagePublicId: data.coverImage?.publicId,
           coverImageAltText: data.coverImage?.altText,
-          coverImageCredit: data.coverImage?.credit, 
+          coverImageCredit: data.coverImage?.credit,
           status: data.isPublished ? PostStatus.PUBLISHED : PostStatus.DRAFT,
           publishDate: data.isPublished ? new Date() : undefined,
         })
@@ -81,7 +95,10 @@ class PostService {
       authorFullname: users.fullname,
       ...(requesterId
         ? {
-            isLikedByMe: sql<boolean>`exists(select 1 from ${likes} where ${likes.postId} = ${posts.id} and ${likes.userId} = ${requesterId})`.mapWith(Boolean),
+            isLikedByMe:
+              sql<boolean>`exists(select 1 from ${likes} where ${likes.postId} = ${posts.id} and ${likes.userId} = ${requesterId})`.mapWith(
+                Boolean,
+              ),
           }
         : {}),
     };
@@ -114,7 +131,12 @@ class PostService {
     };
   }
 
-  public async getPosts(limit: number, cursor?: string, requesterId?: string, authorIdFilter?: string) {
+  public async getPosts(
+    limit: number,
+    cursor?: string,
+    requesterId?: string,
+    authorIdFilter?: string,
+  ) {
     const selectFields = {
       id: posts.id,
       title: posts.title,
@@ -141,7 +163,10 @@ class PostService {
       authorFullname: users.fullname,
       ...(requesterId
         ? {
-            isLikedByMe: sql<boolean>`exists(select 1 from ${likes} where ${likes.postId} = ${posts.id} and ${likes.userId} = ${requesterId})`.mapWith(Boolean),
+            isLikedByMe:
+              sql<boolean>`exists(select 1 from ${likes} where ${likes.postId} = ${posts.id} and ${likes.userId} = ${requesterId})`.mapWith(
+                Boolean,
+              ),
           }
         : {}),
     };
@@ -168,7 +193,9 @@ class PostService {
 
     if (requesterId && postsResult.length > 0) {
       // 1. Get all unique author IDs from the fetched posts
-      const authorIds = [...new Set(postsResult.map((row) => row.authorId))].filter(Boolean) as string[];
+      const authorIds = [
+        ...new Set(postsResult.map((row) => row.authorId)),
+      ].filter(Boolean) as string[];
 
       if (authorIds.length > 0) {
         // 2. Query the 'follows' table to see which of these authors the user follows
@@ -178,8 +205,8 @@ class PostService {
           .where(
             and(
               eq(follows.followerId, requesterId),
-              inArray(follows.followingId, authorIds)
-            )
+              inArray(follows.followingId, authorIds),
+            ),
           );
 
         // 3. Store the results in an O(1) lookup Set
@@ -197,7 +224,8 @@ class PostService {
     }
 
     const formattedPosts = postsResult.map((row) => {
-      const { authorUsername, authorProfileImage, authorFullname, ...post } = row;
+      const { authorUsername, authorProfileImage, authorFullname, ...post } =
+        row;
 
       return {
         ...post,
@@ -223,8 +251,9 @@ class PostService {
     userId: string,
     data: Partial<CreatePostInput> & {
       media?: string[];
+      mediaPublicIds?: string[];
       codeSnippets?: CodeSnippetSchema[];
-      coverImage?: CoverImageData; 
+      coverImage?: CoverImageData;
     },
   ): Promise<Awaited<ReturnType<typeof this.getPost>>> {
     const [post] = await db
@@ -238,7 +267,10 @@ class PostService {
     }
 
     if (post.authorId !== userId) {
-      throw new AppError(HTTP_STATUS.FORBIDDEN, "You are not authorized to edit this post");
+      throw new AppError(
+        HTTP_STATUS.FORBIDDEN,
+        "You are not authorized to edit this post",
+      );
     }
 
     const updates: Record<string, unknown> = {};
@@ -257,7 +289,9 @@ class PostService {
     if (data.tags !== undefined) updates.tags = data.tags;
 
     if (data.isPublished !== undefined) {
-      updates.status = data.isPublished ? PostStatus.PUBLISHED : PostStatus.DRAFT;
+      updates.status = data.isPublished
+        ? PostStatus.PUBLISHED
+        : PostStatus.DRAFT;
       if (data.isPublished && !post.publishDate) {
         updates.publishDate = new Date();
       }
@@ -265,12 +299,17 @@ class PostService {
 
     if (data.coverImage) {
       updates.coverImageUrl = data.coverImage.url;
+      updates.coverImagePublicId = data.coverImage.publicId;
       updates.coverImageAltText = data.coverImage.altText;
       updates.coverImageCredit = data.coverImage.credit;
     }
 
     if (data.media !== undefined) {
       updates.media = data.media;
+    }
+
+    if (data.mediaPublicIds !== undefined) {
+      updates.mediaPublicIds = data.mediaPublicIds;
     }
 
     if (data.codeSnippets !== undefined) {
@@ -284,7 +323,11 @@ class PostService {
     return await this.getPost(postId, userId);
   }
 
-  public async deletePost(postId: string, userId: string, isAdmin: boolean = false): Promise<void> {
+  public async deletePost(
+    postId: string,
+    userId: string,
+    isAdmin: boolean = false,
+  ): Promise<void> {
     const [post] = await db
       .select()
       .from(posts)
@@ -292,21 +335,37 @@ class PostService {
       .limit(1);
 
     if (!post) throw new AppError(HTTP_STATUS.NOT_FOUND, "Post not found");
-    if (post.authorId !== userId && !isAdmin) throw new AppError(HTTP_STATUS.FORBIDDEN, "Not authorized");
+    if (post.authorId !== userId && !isAdmin)
+      throw new AppError(HTTP_STATUS.FORBIDDEN, "Not authorized");
 
     await db.transaction(async (tx) => {
-      await tx.update(posts).set({ status: "trash" }).where(eq(posts.id, postId));
-      await tx.update(users).set({ totalPosts: sql`GREATEST(${users.totalPosts} - 1, 0)` }).where(eq(users.id, post.authorId));
+      await tx
+        .update(posts)
+        .set({ status: "trash" })
+        .where(eq(posts.id, postId));
+      await tx
+        .update(users)
+        .set({ totalPosts: sql`GREATEST(${users.totalPosts} - 1, 0)` })
+        .where(eq(users.id, post.authorId));
     });
 
-    const filesToDelete: string[] = [];
-    if (post.coverImageUrl) filesToDelete.push(post.coverImageUrl);
-    if (post.media && post.media.length > 0) filesToDelete.push(...post.media);
+    const publicIdsToDelete: string[] = [];
 
-    await addMediaCleanupJob(filesToDelete);
+    if (post.coverImagePublicId) {
+      publicIdsToDelete.push(post.coverImagePublicId);
+    }
+
+    if (post.mediaPublicIds && post.mediaPublicIds.length > 0) {
+      publicIdsToDelete.push(...post.mediaPublicIds);
+    }
+
+    await addMediaCleanupJob(publicIdsToDelete);
   }
 
-  public async likePost(postId: string, userId: string): Promise<{ status: "liked" | "unliked" }> {
+  public async likePost(
+    postId: string,
+    userId: string,
+  ): Promise<{ status: "liked" | "unliked" }> {
     let resultStatus: "liked" | "unliked";
     let postAuthorId: string | null = null;
 
@@ -318,12 +377,21 @@ class PostService {
         .limit(1);
 
       if (existingLike) {
-        await tx.delete(likes).where(and(eq(likes.postId, postId), eq(likes.userId, userId)));
-        await tx.update(posts).set({ likeCount: sql`${posts.likeCount} - 1` }).where(eq(posts.id, postId));
+        await tx
+          .delete(likes)
+          .where(and(eq(likes.postId, postId), eq(likes.userId, userId)));
+        await tx
+          .update(posts)
+          .set({ likeCount: sql`${posts.likeCount} - 1` })
+          .where(eq(posts.id, postId));
         resultStatus = "unliked";
       } else {
         await tx.insert(likes).values({ postId, userId });
-        const [post] = await tx.update(posts).set({ likeCount: sql`${posts.likeCount} + 1` }).where(eq(posts.id, postId)).returning({ authorId: posts.authorId });
+        const [post] = await tx
+          .update(posts)
+          .set({ likeCount: sql`${posts.likeCount} + 1` })
+          .where(eq(posts.id, postId))
+          .returning({ authorId: posts.authorId });
         resultStatus = "liked";
 
         if (post && post.authorId !== userId) {
@@ -345,7 +413,11 @@ class PostService {
     return { status: resultStatus! };
   }
 
-  public async sharePost(postId: string, userId: string, platform: string): Promise<{ url: string; platform: string }> {
+  public async sharePost(
+    postId: string,
+    userId: string,
+    platform: string,
+  ): Promise<{ url: string; platform: string }> {
     const [post] = await db
       .update(posts)
       .set({ shareCount: sql`${posts.shareCount} + 1` })
@@ -389,7 +461,10 @@ class PostService {
     });
   }
 
-  private async generateUniqueSlug(title: string, maxRetries = 10): Promise<string> {
+  private async generateUniqueSlug(
+    title: string,
+    maxRetries = 10,
+  ): Promise<string> {
     const baseSlug = slugify(title, { lower: true, strict: true });
     let slug = baseSlug;
     let counter = 1;
