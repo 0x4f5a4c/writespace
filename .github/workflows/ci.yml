@@ -1,29 +1,19 @@
-name: CI Pipeline
+name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
-  validate-and-test:
-    name: Lint, Build, and Test
+  quality:
+    name: Lint, Typecheck, Build, Test
     runs-on: ubuntu-latest
 
     services:
-      redis:
-        image: redis:alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
       postgres:
-        image: postgres:15-alpine
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass
@@ -36,47 +26,54 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: "test-access-secret-minimum-32-characters-long"
+      JWT_REFRESH_SECRET: "test-refresh-secret-minimum-32-characters-long"
+      CLOUDINARY_CLOUD_NAME: "test-cloud"
+      CLOUDINARY_API_KEY: "test-key"
+      CLOUDINARY_API_SECRET: "test-secret"
+      SMTP_HOST: "smtp.example.com"
+      SMTP_PORT: "587"
+      SMTP_USER: "test@example.com"
+      SMTP_PASS: "test-password"
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
-      - name: Install Dependencies
-        run: npm install
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Wait for PostgreSQL to be ready
-        run: |
-          until pg_isready -h localhost -p 5432 -U testuser; do
-            sleep 2
-          done
+      - name: Lint
+        run: npm run lint
 
-      - name: Run Migrations
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+      - name: Run database migrations
         run: npm run db:migrate
-        env:
-          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
 
-      - name: Run Linter
-        run: npm run lint --if-present
-
-      - name: Typecheck & Build
-        run: npm run build --if-present
-
-      - name: Run Unit & Integration Tests
+      - name: Run tests
         run: npm test
-        env:
-          NODE_ENV: test
-          JWT_ACCESS_SECRET: "test-secret-do-not-use-in-prod"
-          JWT_REFRESH_SECRET: "test-secret-do-not-use-in-prod"
-          REDIS_URL: redis://localhost:6379
-          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
-          AWS_REGION: "us-east-1"
-          AWS_ACCESS_KEY_ID: "dummy"
-          AWS_SECRET_ACCESS_KEY: "dummy"
-          AWS_BUCKET_NAME: "dummy-bucket"
-          SMTP_USER: "dummy@example.com"
-          SMTP_PASS: "dummy"

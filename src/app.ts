@@ -47,6 +47,14 @@ app.use("/api/v1/interactions", interactionsRoutes);
 app.use("/api/v1/notifications", notificationRoutes);
 app.use(errorHandler);
 
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
 connectRedis();
 
 pool

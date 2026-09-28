@@ -1,6 +1,6 @@
 # WriteSpace Developer Guide
 
-> Deep dive into architecture, decisions, and patterns for contributors and maintainers.
+> Architecture, patterns, and workflows for contributors and maintainers.
 
 ## 📋 Table of Contents
 - [🧠 Architecture Philosophy](#-architecture-philosophy)
@@ -12,67 +12,79 @@
 - [📈 Performance Optimizations](#-performance-optimizations)
 - [🧩 Adding a New Feature](#-adding-a-new-feature)
 - [🧪 Testing Strategy](#-testing-strategy)
-- [🐳 Local Development with Docker](#-local-development-with-docker)
+- [🐳 Local Development](#-local-development)
 - [🔧 Troubleshooting](#-troubleshooting)
 
 ## 🧠 Architecture Philosophy
 
-WriteSpace follows **vertical slicing** with **dependency inversion**:
+WriteSpace is built with three organizing principles:
+
+**1. Vertical slicing** — every feature owns its controller, service, routes, DTOs, and interfaces. No cross-module imports; if `posts` needs something from `users`, it goes through the DB schema, not the module.
+
+**2. Two service styles, one rule.** Small stateless services use `static` methods (`AuthService`, `UserService`). Services that need to hold onto config or queue handles are exported as singletons (`postService`, `interactionsService`, `notificationService`). Pick the style that matches the service's state needs — don't mix styles within one service.
+
+**3. Fail fast at the edge.** Zod schemas validate every request body, query param, and route param in middleware *before* the controller runs. Controllers receive typed, validated input and never re-validate.
 
 ```text
 src/
-├── modules/ # Features (auth, posts, users...)
-│ └── [feature]/
-│ ├── controller.ts # HTTP layer (req/res handling)
-│ ├── service.ts # Business logic
-│ ├── routes.ts # Route registration
-│ └── validation.ts # Zod schemas
-├── shared/ # Cross-cutting concerns
-└── db/ # Database layer (schemas + Drizzle)
+├── modules/             # Features (auth, posts, users, interactions, notification)
+│   └── [feature]/
+│       ├── dtos/        # Zod schemas + inferred types
+│       ├── interface/   # TypeScript interfaces (JWT payload, OAuth profile, etc.)
+│       ├── [feature].controller.ts
+│       ├── [feature].service.ts
+│       └── [feature].routes.ts
+├── shared/              # Cross-cutting concerns
+│   ├── middlewares/
+│   ├── queues/          # BullMQ queues + workers
+│   ├── infra/           # External services (mailer)
+│   ├── types/           # Express augmentation, shared types
+│   └── utils/           # ApiResponse, AppError, og-generator
+└── db/                  # Drizzle schema + connection pool
 ```
 
-**Rules:**
-- Modules **do not import each other** directly — only through shared abstractions
-- All infrastructure dependencies (DB, Redis, queues) are injected via constructors
-- Shared utilities (`middlewares/`, `utils/`) are the only cross-module imports allowed  
-
 ## 📁 Module Structure 
-Each module follows this pattern:  
+Every module follows the same layout. Example from `modules/users/`:  
 
 ```typescript
-export class AuthController {
-  constructor(private authService: AuthService) {}
-  
-  async register(req: Request, res: Response, next: NextFunction) {
+// modules/users/user.service.ts
+export class UserService {
+  public static async getMe(userId: string): Promise<PublicUser> {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+    if (!user) throw new AppError(HTTP_STATUS.NOT_FOUND, "User session invalid");
+    return this.toPublicUser(user);
+  }
+}
+
+// modules/users/user.controller.ts
+export class UserController {
+  public static async getMe(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await this.authService.register(req.body);
-      return ApiResponse.success(res, result, 201);
+      if (!req.user?.id) throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Session expired");
+      const userRecord = await UserService.getMe(req.user.id);
+      new ApiResponse(res, HTTP_STATUS.OK, "Current user record retrieved", userRecord).send();
     } catch (error) {
-      next(error);  // Handled by global error middleware
+      next(error);  // Global error middleware handles the rest
     }
   }
 }
 
-// modules/auth/service.ts
-export class AuthService {
-  constructor(
-    private userRepo: UserRepository,
-    private redisClient: Redis,
-    private mailer: MailerService
-  ) {}
-  
-  async register(data: RegisterDto): Promise<AuthResult> {
-    // Business logic here
-  }
-}
-
-// modules/auth/routes.ts
+// modules/users/user.routes.ts
 const router = Router();
-const controller = new AuthController(new AuthService(...));
+router.get("/me", authenticate, UserController.getMe);
+export const userRoutes = router;
+```   
 
-router.post('/register', validate(registerSchema), controller.register);
-router.post('/login', validate(loginSchema), controller.login);
-``` 
+**The pattern:**  
+
+- **Controller** — HTTP concerns only. Reads `req`, calls the service, wraps the result in `ApiResponse`, forwards errors via `next(error)`. No business logic.  
+- **Service** — All business logic. Talks to the DB, Redis, queues, external services. Throws `AppError` on failure. Never touches req or res.  
+- **Routes** — Wires middleware and controller together. `upload.fields(...)` for multipart, `validate(schema)` for Zod, `authenticate` for auth.  
+- **DTOs** — Zod schemas. The inferred TypeScript type is what controllers and services use.  
+
+
 
 ## 🔄 Core Flows
 
@@ -84,185 +96,281 @@ sequenceDiagram
     participant DB
     participant Redis
 
-    Client->>API: POST /auth/login (email, password)
-    API->>DB: Validate credentials
-    DB-->>API: User record
-    API->>API: Generate JWT access token (15m)
+    Client->>API: POST /api/v1/auth/register (email, password, username)
+    API->>Redis: Store registration payload + 6-digit OTP (60s TTL)
+    API->>Client: 200 OK — OTP sent via email
+
+    Client->>API: POST /api/v1/auth/verify-email (email, otp)
+    API->>Redis: Validate OTP
+    API->>DB: Insert user (bcrypt hash, 12 rounds)
+    API->>API: Sign access + refresh tokens
     API->>Redis: Store refresh token (7d TTL)
-    API-->>Client: { accessToken, refreshToken }
-    
-    Client->>API: GET /posts (Bearer accessToken)
-    API->>API: Verify JWT signature + expiry
+    API-->>Client: { user, accessToken, refreshToken }
+
+    Client->>API: GET /api/v1/posts (Bearer accessToken)
+    API->>API: Verify JWT signature + expiry (15m)
     API-->>Client: Posts data
-    
-    Client->>API: POST /auth/refresh (refreshToken)
-    API->>Redis: Validate refresh token
-    API->>API: Generate new access token
-    API-->>Client: { accessToken }
+
+    Client->>API: POST /api/v1/auth/refresh-token (refreshToken)
+    API->>Redis: Validate refresh token exists
+    API->>Redis: Delete old token (rotation)
+    API->>API: Issue new token pair
+    API-->>Client: { accessToken, refreshToken }
 ```
 
 **Implementation details:**
--  Access token: JWT with `userId`, `role`, expires in 15m
--  Refresh token: UUID stored in Redis with `userId` mapping, 7d TTL
--  OAuth2: Passport.js strategies (`Google, GitHub`) with automatic user creation
--  Password reset: 6-digit code stored in Redis (15m expiry) sent via email
+-  Access token: JWT signed with `JWT_ACCESS_SECRET`, contains `{ id, role }`, 15m expiry
+-  Refresh token: also a JWT, signed with `JWT_REFRESH_SECRET`, 7d expiry, stored in Redis under `refresh_token:{userId}:{token}`. **Rotated on every refresh** — old token is deleted.
+-  OAuth2: Passport.js strategies for Google and GitHub. First-time OAuth users get a random password hash; subsequent logins reuse the same account.
+-  Password reset: 32-char token stored in Redis (1h TTL). On reset, **all** refresh tokens for that user are invalidated via `redis.scanIterator`.
 
-### Post Creation Flow
+### Post Creation Flow (with Cloudinary)  
 ```mermaid
 sequenceDiagram
     participant Client
     participant API
-    participant S3
+    participant Cloudinary
     participant DB
     participant Queue
 
-    Client->>API: POST /posts (multipart: JSON + images)
-    API->>API: Multer processes files (temp storage)
-    API->>API: Zod validation (title, content, tags)
-    API->>S3: Upload images (returns URLs)
-    S3-->>API: imageUrls[]
-    API->>DB: Insert post record (with image URLs)
+    Client->>API: POST /api/v1/posts (multipart: JSON + banner + media[])
+    API->>API: Multer streams files to Cloudinary
+    API->>Cloudinary: upload_stream() per file
+    Cloudinary-->>API: { secure_url, public_id } per file
+    API->>API: Zod validation on JSON fields
+    API->>DB: Insert post (URLs + public_ids + content)
     DB-->>API: Post created
-    API->>Queue: BullMQ job for notifications
-    Queue-->>API: Job queued (async)
-    API-->>Client: 201 Created { postId }
+    API->>Queue: enqueue interaction / email jobs
+    API-->>Client: 201 Created { post }
 ```
 
 **Key files:**  
 
--  `shared/middlewares/upload.ts`: Multer configuration (limits: 5MB per file, 10 files max)
--  `modules/posts/service.ts`: createPost() method with S3 upload orchestration
--  `shared/queues/notificationWorker.ts`: BullMQ worker processing email notifications
+-  `shared/middlewares/upload.middleware.ts` — custom `CloudinaryStorageEngine` implementing Multer's `StorageEngine`. Streams each file to Cloudinary, attaches `location` (secure URL), `public_id`, `key`, and `secure_url` to `req.file(s)`.
+-  `shared/types/cloudinary-file.ts` — `CloudinaryFile`, `CloudinaryFilesMap` types used across controllers.
+-  `modules/posts/posts.service.ts` — `createPost()` writes both `media` (URLs) and `mediaPublicIds` (IDs). Deletion needs the IDs.  
+
+**Limits:** 5 MB per file, 12 files per request (1 banner + 10 media + buffer), configured via `MAX_FILE_SIZE_MB` and `MAX_FILES_PER_UPLOAD` env vars.  
+
+### Media Cleanup Flow  
+
+When a post is deleted, its Cloudinary assets are queued for cleanup:  
+
+```typescript
+// posts.service.ts::deletePost()
+const publicIdsToDelete: string[] = [];
+if (post.coverImagePublicId) publicIdsToDelete.push(post.coverImagePublicId);
+if (post.mediaPublicIds?.length) publicIdsToDelete.push(...post.mediaPublicIds);
+await addMediaCleanupJob(publicIdsToDelete);
+```  
+
+The worker (`shared/queues/media.worker.ts`) calls `cloudinary.uploader.destroy(publicId)` for each. It guards against URLs accidentally passed as IDs and rethrows on failure so BullMQ applies exponential backoff.  
+
 
 ### Notification Flow (Async)
 
-```typescript
-// shared/queues/notificationQueue.ts
-export const notificationQueue = new Queue('notifications', {
-  connection: redisConfig,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: true,
-  }
-});
+Three queues, each with its own worker file:
 
-// Worker processes
-notificationQueue.process(async (job) => {
-  const { type, recipientId, data } = job.data;
-  
-  switch(type) {
-    case 'email':
-      await mailer.send(recipientEmail, data.template, data.context);
-      break;
-    case 'in-app':
-      await db.insert(notifications).values({ userId: recipientId, ...data });
-      break;
-  }
-});
+| Queue | Producer | Worker | Purpose |
+|-------|----------|--------|---------|
+| `email` | `notificationService.send*Email()` | `email.worker.ts` | SMTP sends via Nodemailer |
+| `interaction` | `addInteractionJob()` from `posts/interactions` | `interaction.worker.ts` | In-app notifications on like/comment/follow |
+| `media-cleanup` | `addMediaCleanupJob()` from `posts/users` | `media.worker.ts` | Cloudinary destroy calls |
+
+All three workers are instantiated at `server.ts` import time and gracefully closed on `SIGTERM`/`SIGINT`.  
+
+```typescript
+// shared/queues/media.worker.ts
+export const mediaWorker = new Worker(
+  "media-cleanup",
+  async (job: Job<MediaCleanupJobData>) => {
+    const { publicIds } = job.data;
+    for (const publicId of publicIds) {
+      if (!publicId || publicId.startsWith("http")) continue;
+      await cloudinary.uploader.destroy(publicId);
+    }
+  },
+  { connection: redisConnectionOptions },
+);
 ```
 
-## 🗄️ Database Design
+## 🗄️ Database Design  
 
-### Schema Overview
-
-WriteSpace uses PostgreSQL managed via Drizzle ORM. The relational structure is designed for high performance, utilizing UUIDs for primary entities and composite primary keys for junction tables (like likes and follows) to ensure data integrity and fast lookups.
+PostgreSQL via Drizzle ORM. All primary entities use UUIDs; junction tables use composite primary keys.  
 
 | Table | Purpose | Key Fields |
-| :--- | :--- | :--- |
-| `users` | User accounts, profiles, stats, and auth | `id` (uuid), `email`, `username`, `passwordHash`, `role`, `status` |
-| `posts` | Blog posts (supports rich media/code) | `id` (uuid), `title`, `slug`, `content`, `authorId`, `status`, `publishDate` |
-| `comments` | Threaded, hierarchical post comments | `id` (uuid), `content`, `postId`, `authorId`, `parentCommentId` |
-| `likes` | Tracks user likes on posts | `userId`, `postId` (Composite PK) |
-| `comment_likes` | Tracks user likes on specific comments | `commentId`, `userId` (Composite PK) |
-| `shares` | Tracks post share events to platforms | `id` (serial), `userId`, `postId`, `platform` |
-| `notifications` | In-app system and interaction alerts | `id` (serial), `recipientId`, `actorId`, `type`, `isRead` |
-| `follows` | User-to-user follower relationships | `followerId`, `followingId` (Composite PK) |
+|-------|---------|------------|
+| `users` | Accounts, profiles, social links, stats | `id` (uuid), `email`, `username`, `passwordHash`, `role`, `status` |
+| `posts` | Blog posts with cover + media | `id` (uuid), `title`, `slug`, `content`, `coverImageUrl`, `coverImagePublicId`, `mediaPublicIds`, `authorId`, `status` |
+| `comments` | Threaded comments | `id` (uuid), `content`, `postId`, `authorId`, `parentCommentId` |
+| `likes` | Post likes | `userId`, `postId` (composite PK) |
+| `comment_likes` | Comment likes | `commentId`, `userId` (composite PK) |
+| `shares` | Share events per platform | `id` (uuid), `userId`, `postId`, `platform` |
+| `notifications` | In-app alerts | `id` (uuid), `recipientId`, `actorId`, `type`, `isRead` |
+| `follows` | Follower graph | `followerId`, `followingId` (composite PK) | 
 
-### Key Design Decisions
+### Key Design Decisions  
 
-1. **UUID primary keys**: Database-generated (`gen_random_uuid()`) for distributed system compatibility
-2. **Soft deletes**: `deleted_at` timestamp on `posts`, `comments`, `users` (preserves data integrity)
-3. **Polymorphic likes**: Single `likes` table with `target_type` enum ('post', 'comment')
-4. **JSON content:** Post `content` stored as JSON for rich text structure (headings, images, code blocks)
-5. **Indexes**: 
-   ```sql
-   CREATE INDEX idx_posts_author_status ON posts(author_id, status);
-   CREATE INDEX idx_comments_post_parent ON comments(post_id, parent_id);
-   CREATE INDEX idx_likes_target ON likes(target_id, target_type);
-   ```
-## Drizzle ORM Example
+- UUID primary keys — `uuid().defaultRandom()`, distributed-friendly. Junction tables use composite PKs to enforce uniqueness at the DB level.
+
+- Soft delete via status enum — `posts.status` is `draft | scheduled | published | archived | trash`. `users.status` is `active | suspended | banned`. No `deleted_at` column; the enum is the source of truth.
+
+- Separate like tables, not polymorphic — `likes` for posts, `comment_likes` for comments. The old README mentioned a polymorphic `target_type` column; that doesn't exist. Two tables with foreign keys are simpler and faster.
+
+- Content stored as text — not JSON. Post bodies are sanitized HTML (`sanitize-html` with an allow-list) before insert.
+
+- Indexes — `posts_status_publish_date_idx` on `(status, publishDate)`, `posts_author_idx` on `(authorId)`. Add new indexes in `db/schema/*.ts` and regenerate with `npm run db:generate`.  
+
 ```typescript
 // db/schema/posts.ts
-export const posts = pgTable('posts', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  title: varchar('title', { length: 255 }).notNull(),
-  content: json('content').notNull(), // Rich text structure
-  authorId: uuid('author_id').references(() => users.id).notNull(),
-  status: pgEnum('post_status', ['draft', 'published', 'archived']).default('draft'),
-  publishedAt: timestamp('published_at'),
-  createdAt: timestamp('created_at').defaultNow(),
-  deletedAt: timestamp('deleted_at'),
-});
-
-// db/schema/relations.ts
-export const postsRelations = relations(posts, ({ one, many }) => ({
-  author: one(users, { fields: [posts.authorId], references: [users.id] }),
-  comments: many(comments),
-  likes: many(likes),
-}));
-``` 
+export const posts = pgTable("posts", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  title: text("title").notNull(),
+  slug: text("slug").notNull().unique(),
+  content: text("content").notNull(),
+  coverImageUrl: text("cover_image_url"),
+  coverImagePublicId: text("cover_image_public_id"),
+  media: text("media").array().default([]),
+  mediaPublicIds: jsonb("media_public_ids").$type<string[]>().default([]),
+  authorId: uuid("author_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  status: postStatusEnum("status").default("draft").notNull(),
+  publishDate: timestamp("publish_date", { withTimezone: true }),
+  // ...
+}, (table) => [
+  index("posts_status_publish_date_idx").on(table.status, table.publishDate),
+  index("posts_author_idx").on(table.authorId),
+]);
+```  
 
 ## 🔐 Security Practices
 
 | Layer | Implementation |
-| :--- | :--- |
-| **Headers** | Helmet.js for security headers (XSS, CSP, HSTS) |
-| **Rate Limiting** | `express-rate-limit`: 100 requests per 15 minutes per IP |
-| **Input Validation** | Zod schemas with `.strict()` to reject unknown fields |
-| **SQL Injection** | Drizzle ORM parameterized queries |
-| **XSS** | Content sanitization before storing (DOMPurify on client) |
-| **Password Storage** | bcrypt with 10 rounds |
-| **JWT Storage** | Access token in memory, refresh token in Redis (not localStorage on client) |
-| **CORS** | Whitelist configured via `CLIENT_URL` env var |
+|-------|----------------|
+| Headers | Helmet.js (XSS, CSP, HSTS, etc.) |
+| Rate limiting | express-rate-limit + Redis store. Global: 100 req/15min. Auth endpoints: 5 req/15min. |
+| Input validation | Zod schemas in DTOs. Applied via `validate()` middleware before controllers run. |
+| SQL injection | Drizzle ORM parameterized queries. No raw SQL string interpolation. |
+| XSS | Server-side `sanitize-html` on post content before storage. Allow-list for tags and attributes. |
+| Password storage | bcrypt, 12 salt rounds (`SALT_ROUNDS` in `auth.service.ts`). |
+| Token storage | Access token: short-lived JWT (15m). Refresh token: JWT (7d) stored in Redis, rotated on every refresh. |
+| CORS | Single origin from `CLIENT_URL`. `credentials: true`. |
+| Proxy trust | `app.set("trust proxy", 1)` — required for correct IP behind Render/Nginx. |
 
 
 ## 🚦 Error Handling
 
-All errors use the `AppError` class:  
+### Throwing errors
+
+All domain errors throw `AppError`:
+
 ```typescript
-// shared/utils/AppError.ts
+// shared/utils/app.error.ts
 export class AppError extends Error {
-  public statusCode: number;
-  public errorCode: string;
-  
-  constructor(message: string, statusCode = 500, errorCode = 'INTERNAL_ERROR') {
+  public readonly statusCode: number;
+  constructor(statusCode: number, message: string) {
     super(message);
     this.statusCode = statusCode;
-    this.errorCode = errorCode;
   }
 }
 
-// Usage
-throw new AppError('Invalid credentials', 401, 'AUTH_001');
+// Usage in a service
+throw new AppError(HTTP_STATUS.NOT_FOUND, "Post not found");
 ```
 
-**Error Response Format:**  
+> **Argument order:** `(statusCode, message)` — status code first. If you see a call site with the arguments reversed, it's a bug.
+
+### Success response shape
+
+Every successful response goes through `ApiResponse`:
+
+```typescript
+new ApiResponse(res, HTTP_STATUS.CREATED, "Post created successfully", post).send();
+```
+
+Produces:
+
+```json
+{
+  "success": true,
+  "statusCode": 201,
+  "message": "Post created successfully",
+  "data": { "...": "..." },
+  "timestamp": "2026-03-30T10:30:00.000Z"
+}
+```
+
+The `success` flag is computed from the status code (2xx = true). You never set it manually.
+
+### Error response shape
+
+The global handler (`shared/middlewares/error.middleware.ts`) catches everything forwarded via `next(error)` and returns:
+
 ```json
 {
   "success": false,
-  "error": {
-    "code": "AUTH_001",
-    "message": "Invalid credentials",
-    "timestamp": "2026-03-30T10:30:00Z"
+  "message": "Invalid credentials"
+}
+```
+
+In development (`NODE_ENV=development`), the response also includes a `stack` field with the full stack trace. In production, `stack` is omitted.
+
+### ⚠️ Success and error shapes differ
+
+The two response shapes are **not symmetric**:
+
+| Field | Success | Error |
+|---|---|---|
+| `success` | ✅ | ✅ |
+| `statusCode` | ✅ | ❌ missing |
+| `message` | ✅ | ✅ |
+| `data` | ✅ | ❌ missing |
+| `timestamp` | ✅ | ❌ missing |
+| `stack` | ❌ | ✅ (dev only) |
+
+**Client-side implication:** don't read `response.body.statusCode` — it will be `undefined` on errors. Use `response.status` (the HTTP status line) instead:
+
+```typescript
+// Bad — breaks on error responses
+if (response.body.statusCode === 401) { ... }
+
+// Good — works on both success and error
+if (response.status === 401) { ... }
+```
+
+Aligning the two shapes is a known improvement for a future refactor.
+
+### What the handler recognizes
+
+| Error thrown | Handling |
+|---|---|
+| `AppError` | Uses its `statusCode` and `message` |
+| `ZodError` | Joins issues as `path: message`, returns 400 |
+| Postgres `23505` (unique violation) | Extracts field from `detail`, returns 409 with `Duplicate value for <field>` |
+| Postgres `23503` (FK violation) | Returns 400 with `Referenced resource not found` |
+| Postgres `23502` (NOT NULL violation) | Extracts column, returns 400 with `Missing required value: <column>` |
+| Any other `Error` | Returns 500 with the error message |
+| Non-`Error` value thrown | Returns 500 with `Internal Server Error` |
+
+Every error is logged via the structured logger before the response is sent.
+
+### Middleware contract
+
+Controllers must forward errors with `next(error)` — never respond directly from a catch block:
+
+```typescript
+// Correct
+public static async getPost(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const post = await postService.getPost(req.params.id);
+    new ApiResponse(res, HTTP_STATUS.OK, "Post fetched", post).send();
+  } catch (error) {
+    next(error);   // global handler takes over
   }
 }
 ```
 
-**Global Error Handler** (`shared/middlewares/errorHandler.ts`):
--  Logs errors with Zario (structured logging)
--  Returns sanitized responses (no stack traces in production)
--  Handles Zod validation errors, JWT errors, and DB unique constraint violations
+If a controller calls `res.status(...).json(...)` inside a catch block, the global handler is bypassed, the error isn't logged, and the response shape diverges from the standard. Always delegate via `next(error)`.  
+
 
 ## 📈 Performance Optimizations
 
@@ -399,14 +507,23 @@ services:
 
 ## 🔧 Troubleshooting
 
-| Issue | Likely Cause | Solution |
-| :--- | :--- | :--- |
-| `Error: connect ECONNREFUSED 127.0.0.1:5432` | PostgreSQL not running | Run `docker-compose up -d postgres` |
-| `Error: Redis connection failed` | Redis not running | Run `docker-compose up -d redis` |
-| `Drizzle migration error: relation already exists` | Migration state mismatch | Run `bun run db:drop` (dev only) → `bun run db:generate` → `bun run db:migrate` |
-| `JWT_SECRET must be provided` | Missing env variable | Add `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` to `.env` |
-| `MulterError: Unexpected field` | Form field name mismatch | Check `upload.single('image')` matches client field name |
-| `S3 upload fails: AccessDenied` | AWS credentials/permissions | Verify IAM role has `s3:PutObject` permission |
-| `Test suite hanging` | Test DB not reset | Ensure `NODE_ENV=test` uses a separate database |  
+| Issue | Likely cause | Fix |
+|---|---|---|
+| `password authentication failed for user "postgres"` | Wrong password in `DATABASE_URL` | Fix the password in `.env`. Format: `postgresql://[user]:[password]@[host]:[port]/[db]` |
+| `ECONNREFUSED 127.0.0.1:5432` | PostgreSQL not running | Linux: `sudo systemctl start postgresql` · macOS: `brew services start postgresql` |
+| `ECONNREFUSED 127.0.0.1:6379` | Redis not running | Linux: `sudo systemctl start redis` · macOS: `brew services start redis` |
+| `❌ Invalid environment variables:` on startup | Zod validation failed in `src/config/env.ts` | The error output names the missing/malformed field. Check `.env` and compare against `.env.example` |
+| `Server crashed` right after boot with a `LIMIT_FILE_SIZE` message | Upload exceeded `MAX_FILE_SIZE_MB` | Raise the env var, or reduce the file size on the client |
+| `LIMIT_FILE_COUNT` on a post create/update | More files than `MAX_FILES_PER_UPLOAD` | Raise the env var. Default is 12 (1 banner + 10 media + buffer) |
+| `Invalid file type. Only JPEG, JPG, PNG, GIF, and WEBP images are allowed.` | `fileFilter` rejected the upload | Only image MIME types pass. Check the `Content-Type` sent by the client |
+| `Cloudinary destroy succeeded for public_id: ...` in logs | Normal — the media worker cleaned up a deleted asset | No action needed |
+| `Media cleanup skipped invalid public_id (looks like a URL)` | A URL was passed to the cleanup queue instead of a `public_id` | Bug in the caller. Check the `addMediaCleanupJob` call sites in `posts.service.ts` and `user.service.ts` |
+| `Jest encountered an unexpected token` from `htmlparser2` | The `sanitize-html` mock is missing or not registered | Confirm `test/__mocks__/sanitize-html.ts` exists and is mapped in `jest.config.ts` under `moduleNameMapper` |
+| `A worker process has failed to exit gracefully` after tests | Open handles held by Redis / BullMQ workers at test teardown | Not a bug — `forceExit: true` in Jest config terminates them. Investigate with `npx jest --detectOpenHandles` if it becomes a problem |
+| `response.body.statusCode` is `undefined` on errors | Success and error responses have different shapes (see [Error Handling](#-error-handling)) | Use `response.status` — the HTTP status line — instead of `response.body.statusCode` |
+| `Graceful shutdown timed out, forcing exit` | A close handler hung (Redis unresponsive, Postgres pool not draining) | Check the previous log line to see which component stalled. The 10-second timeout is intentional |
+| `Drizzle migration error: relation already exists` | Migration state out of sync with the DB | Delete the affected table in `psql`, then run `npm run db:generate` → `npm run db:migrate` again. Do **not** run this in production |
+| `ENOENT: no such file or directory, open 'coverage/lcov-report/index.html'` | Coverage report not generated yet | Run `npm run test:cov` first, then open the file |
+| `Error: Cannot find module '@config/env'` | TS path aliases not resolved at runtime | Confirm you started the app with `npm run dev` or `npm start` (both go through `ts-node`/`tsc-alias`). Running `node src/server.ts` directly will fail |
 
-**Need help?** Open an issue or contact [@Afzal14786](https://github.com/afzal14786) on **GitHub**.
+**Need help?** Open an issue at [github.com/Afzal14786/writespace/issues](https://github.com/Afzal14786/writespace/issues).  

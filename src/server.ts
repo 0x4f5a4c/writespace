@@ -10,7 +10,7 @@ import logger from "./config/logger";
 const PORT = env.PORT;
 
 const server = app
-  .listen(PORT, () => {
+  .listen(Number(PORT), "0.0.0.0", () => {
     logger.info(`Server is running on port no ${PORT}`);
   })
   .on("error", (err) => {
