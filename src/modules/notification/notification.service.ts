@@ -152,7 +152,7 @@ class NotificationService implements INotificationService {
       NotificationType.LIKE,
       "liked your post.",
       postId,
-      actorId
+      actorId,
     );
   }
 
@@ -168,7 +168,7 @@ class NotificationService implements INotificationService {
       NotificationType.COMMENT,
       `commented: "${commentPreview}"`,
       postId,
-      actorId
+      actorId,
     );
   }
 
@@ -182,7 +182,7 @@ class NotificationService implements INotificationService {
       NotificationType.FOLLOW,
       "started following you.",
       actorId,
-      actorId
+      actorId,
     );
   }
 
@@ -197,7 +197,7 @@ class NotificationService implements INotificationService {
       NotificationType.SHARE,
       "shared your post.",
       postId,
-      actorId
+      actorId,
     );
   }
 
@@ -206,14 +206,14 @@ class NotificationService implements INotificationService {
     type: NotificationType,
     message: string,
     relatedId?: string,
-    actorId?: string
+    actorId?: string,
   ): Promise<void> {
     await addInteractionJob({
       recipientId: recipient,
       type,
       message,
       relatedId,
-      actorId
+      actorId,
     });
   }
 

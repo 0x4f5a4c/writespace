@@ -21,8 +21,8 @@ export const validate =
         next(
           new AppError(
             HTTP_STATUS.BAD_REQUEST,
-            `Validation Error: ${messages}`
-          )
+            `Validation Error: ${messages}`,
+          ),
         );
       } else {
         next(error);

@@ -23,12 +23,12 @@ export const authenticate = async (
     const token = authHeader.split(" ")[1];
 
     const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET) as IJwtPayload;
-    
+
     req.user = {
       id: decoded.id,
-      role: decoded.role
+      role: decoded.role,
     };
-    
+
     next();
   } catch (error) {
     if (error instanceof jwt.JsonWebTokenError) {
@@ -49,7 +49,11 @@ export const authenticate = async (
  * which contains { id, role } at the top level.
  */
 export const authorize = (...allowedRoles: string[]) => {
-  return (req: Request<{role: string}>, res: Response, next: NextFunction) => {
+  return (
+    req: Request<{ role: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
     const userRole = req.user?.role;
 
     if (!userRole) {

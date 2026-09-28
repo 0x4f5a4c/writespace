@@ -11,30 +11,56 @@ import {
 } from "./dtos/password-reset.dto";
 import { updatePasswordSchema } from "./dtos/update-password.dto";
 import { authenticate } from "@shared/middlewares/auth.middleware";
-import { 
-  loginLimiter, 
-  registerLimiter, 
-  emailActionLimiter 
+import {
+  loginLimiter,
+  registerLimiter,
+  emailActionLimiter,
 } from "@shared/middlewares/rate-limit.middleware";
 
 const router = Router();
 
 // Standard Auth
 
-router.post("/register", registerLimiter, validate(registerSchema), authController.register);
+router.post(
+  "/register",
+  registerLimiter,
+  validate(registerSchema),
+  authController.register,
+);
 
-router.post("/verify-email", emailActionLimiter, validate(verifyOtpSchema), authController.verifyEmail);
+router.post(
+  "/verify-email",
+  emailActionLimiter,
+  validate(verifyOtpSchema),
+  authController.verifyEmail,
+);
 
-router.post("/login", loginLimiter, validate(loginSchema), authController.login);
+router.post(
+  "/login",
+  loginLimiter,
+  validate(loginSchema),
+  authController.login,
+);
 
-router.post("/forgot-password", emailActionLimiter, authenticate, validate(forgotPasswordSchema), authController.forgotPassword);
-router.post("/reset-password", emailActionLimiter, validate(resetPasswordSchema), authController.resetPassword);
+router.post(
+  "/forgot-password",
+  emailActionLimiter,
+  authenticate,
+  validate(forgotPasswordSchema),
+  authController.forgotPassword,
+);
+router.post(
+  "/reset-password",
+  emailActionLimiter,
+  validate(resetPasswordSchema),
+  authController.resetPassword,
+);
 
 router.put(
   "/update-password",
   authenticate,
   validate(updatePasswordSchema),
-  authController.updatePassword
+  authController.updatePassword,
 );
 
 router.post("/refresh-token", authController.refreshToken);
@@ -43,11 +69,15 @@ router.post("/logout", authController.logout);
 // Google Auth
 router.get(
   "/google",
-  passport.authenticate("google", { scope: ["profile", "email"] }) as unknown as RequestHandler,
+  passport.authenticate("google", {
+    scope: ["profile", "email"],
+  }) as unknown as RequestHandler,
 );
 router.get(
   "/google/callback",
-  passport.authenticate("google", { session: false }) as unknown as RequestHandler,
+  passport.authenticate("google", {
+    session: false,
+  }) as unknown as RequestHandler,
   authController.googleCallback,
 );
 

@@ -22,16 +22,16 @@ export const interactionWorker = new Worker<IInteractionJob>(
 
       if (actor) {
         const displayName = actor.fullname || actor.username;
-        finalMessage = `${displayName} ${message}`; 
+        finalMessage = `${displayName} ${message}`;
       }
     }
 
     await db.insert(notifications).values({
       recipientId,
-      actorId: actorId || null,      // MUST BE ADDED
+      actorId: actorId || null, // MUST BE ADDED
       type,
       message: finalMessage,
-      relatedId: relatedId || null,  // MUST FALLBACK TO NULL
+      relatedId: relatedId || null, // MUST FALLBACK TO NULL
     });
   },
   {
@@ -43,6 +43,9 @@ export const interactionWorker = new Worker<IInteractionJob>(
   },
 );
 
-interactionWorker.on("failed", (job: Job<IInteractionJob> | undefined, err: Error) => {
-  logger.error(`Interaction job ${job?.id} failed: ${err.message}`);
-});
+interactionWorker.on(
+  "failed",
+  (job: Job<IInteractionJob> | undefined, err: Error) => {
+    logger.error(`Interaction job ${job?.id} failed: ${err.message}`);
+  },
+);

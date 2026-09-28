@@ -1,6 +1,9 @@
 import { baseEmailLayout } from "./layout";
 
-export const passwordUpdateTemplate = (data: { username: string; contactSupportLink: string }) => {
+export const passwordUpdateTemplate = (data: {
+  username: string;
+  contactSupportLink: string;
+}) => {
   const htmlContent = `
     <div>
       <h2 style="color: #0f172a; margin-bottom: 16px;">Password Updated</h2>
@@ -14,5 +17,8 @@ export const passwordUpdateTemplate = (data: { username: string; contactSupportL
 
   const textContent = `Password Updated\n\nHi ${data.username},\n\nThe password for your Writespace account was successfully changed.\n\nIf you did not make this change, please contact support immediately to secure your account:\n${data.contactSupportLink}`;
 
-  return { html: baseEmailLayout(htmlContent, "Password Updated - Writespace"), text: textContent };
+  return {
+    html: baseEmailLayout(htmlContent, "Password Updated - Writespace"),
+    text: textContent,
+  };
 };

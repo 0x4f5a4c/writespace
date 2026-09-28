@@ -7,7 +7,11 @@ export const addCommentSchema = z.object({
       .trim()
       .min(1, "Comment cannot be empty")
       .max(2500, "Comment is too long."),
-    parentCommentId: z.string().uuid("Invalid parent comment ID").optional().nullable(),
+    parentCommentId: z
+      .string()
+      .uuid("Invalid parent comment ID")
+      .optional()
+      .nullable(),
   }),
 });
 

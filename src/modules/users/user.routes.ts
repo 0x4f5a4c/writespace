@@ -36,9 +36,13 @@ router.get("/me", authenticate, UserController.getMe);
  * @access  Public (Optional Auth)
  */
 // We use a custom auth check here so non-logged in users can still view profiles
-router.get("/profile/:username", (req, res, next) => {
-  authenticate(req, res, () => next());
-}, UserController.getProfile);
+router.get(
+  "/profile/:username",
+  (req, res, next) => {
+    authenticate(req, res, () => next());
+  },
+  UserController.getProfile,
+);
 
 /**
  * @route   POST /api/v1/users/:id/follow
@@ -58,11 +62,11 @@ router.put(
   authorize("admin", "user"),
   upload.fields([
     { name: "profileImage", maxCount: 1 },
-    { name: "bannerImage", maxCount: 1 }
+    { name: "bannerImage", maxCount: 1 },
   ]),
   parseFormDataJson,
   validate(UpdateProfileSchema),
-  UserController.updateProfile
+  UserController.updateProfile,
 );
 
 /**
@@ -74,7 +78,7 @@ router.delete(
   "/:id",
   authenticate,
   authorize("admin", "user"),
-  UserController.deleteUser
+  UserController.deleteUser,
 );
 
 export const userRoutes = router;

@@ -90,7 +90,11 @@ export class AuthController {
       const cookies = req.cookies as Record<string, string> | undefined;
       const body = req.body as Record<string, unknown> | undefined;
 
-      const refreshToken = cookies?.refreshToken || (typeof body?.refreshToken === 'string' ? body.refreshToken : undefined);
+      const refreshToken =
+        cookies?.refreshToken ||
+        (typeof body?.refreshToken === "string"
+          ? body.refreshToken
+          : undefined);
 
       if (!refreshToken) {
         new ApiResponse(
@@ -116,13 +120,13 @@ export class AuthController {
   // 5. Logout
   public async logout(req: Request, res: Response, next: NextFunction) {
     try {
-      // We read the cookie directly to destroy the session. 
+      // We read the cookie directly to destroy the session.
       // We DO NOT rely on req.user, because the access token might be expired.
       const cookies = req.cookies as Record<string, string> | undefined;
       const refreshToken = cookies?.refreshToken;
 
       if (refreshToken) {
-         // Pass just the token to the service to destroy it
+        // Pass just the token to the service to destroy it
         await authService.logout(refreshToken);
       }
 
@@ -176,7 +180,7 @@ export class AuthController {
       }
 
       const result = await authService.updatePassword(req.user.id, req.body);
-      
+
       new ApiResponse(res, HTTP_STATUS.OK, result.message, null).send();
     } catch (error) {
       next(error);
@@ -226,12 +230,14 @@ export class AuthController {
       const profile = {
         provider: "github" as const,
         providerId: driverUser.id,
-        email: driverUser.emails?.[0]?.value || "", 
-        displayName: driverUser.displayName || driverUser.username || "GitHub User", 
+        email: driverUser.emails?.[0]?.value || "",
+        displayName:
+          driverUser.displayName || driverUser.username || "GitHub User",
         picture: driverUser.photos?.[0]?.value,
       };
 
-      const { accessToken, refreshToken } = await authService.githubAuth(profile);
+      const { accessToken, refreshToken } =
+        await authService.githubAuth(profile);
 
       res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
       res.redirect(`${env.CLIENT_URL}/auth/success?token=${accessToken}`);

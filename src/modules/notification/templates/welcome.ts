@@ -1,6 +1,9 @@
 import { baseEmailLayout } from "./layout";
 
-export const welcomeTemplate = (data: { username: string; ctaLink: string }) => {
+export const welcomeTemplate = (data: {
+  username: string;
+  ctaLink: string;
+}) => {
   const htmlContent = `
     <div style="text-align: center;">
       <h2 style="color: #0f172a; margin-bottom: 16px;">Welcome to Writespace, ${data.username}!</h2>
@@ -11,5 +14,8 @@ export const welcomeTemplate = (data: { username: string; ctaLink: string }) => 
 
   const textContent = `Welcome to Writespace, ${data.username}!\n\nWe're thrilled to have you on board. Start exploring, writing, and connecting with other developers today.\n\nComplete Your Profile: ${data.ctaLink}\n\n© ${new Date().getFullYear()} Writespace. All rights reserved.`;
 
-  return { html: baseEmailLayout(htmlContent, "Welcome to Writespace!"), text: textContent };
+  return {
+    html: baseEmailLayout(htmlContent, "Welcome to Writespace!"),
+    text: textContent,
+  };
 };
