@@ -1,7 +1,7 @@
 import { eq, and, desc, sql, isNull, lt } from "drizzle-orm";
 import { db } from "../../db";
 import { comments, shares, posts, users, likes } from "../../db/schema";
-import { commentLikes } from "../../db/schema/comment-likes"; 
+import { commentLikes } from "../../db/schema/comment-likes";
 import { AddCommentDto } from "./dtos/add-comment.dto";
 import { AppError } from "@shared/utils/app.error";
 import { HTTP_STATUS } from "@shared/constants/http-codes";
@@ -67,7 +67,11 @@ class InteractionsService {
         actorId: userId,
         relatedId: postId,
         message: "replied to your comment",
-      }).catch((err: unknown) => logger.error("Failed to queue reply notification", { error: err instanceof Error ? err.message : String(err) }));
+      }).catch((err: unknown) =>
+        logger.error("Failed to queue reply notification", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     } else if (post.authorId !== userId) {
       addInteractionJob({
         type: NotificationType.COMMENT,
@@ -75,7 +79,11 @@ class InteractionsService {
         actorId: userId,
         relatedId: postId,
         message: "commented on your post",
-      }).catch((err: unknown) => logger.error("Failed to queue comment notification", { error: err instanceof Error ? err.message : String(err) }));
+      }).catch((err: unknown) =>
+        logger.error("Failed to queue comment notification", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     }
 
     return await this.getCommentById(newCommentId!, userId);
@@ -85,11 +93,11 @@ class InteractionsService {
     postId: string,
     limit: number = 20,
     cursor?: string,
-    requesterId?: string
+    requesterId?: string,
   ) {
     const conditions = [
       eq(comments.postId, postId),
-      isNull(comments.parentCommentId)
+      isNull(comments.parentCommentId),
     ];
 
     if (cursor) {
@@ -112,9 +120,14 @@ class InteractionsService {
           fullname: users.fullname,
           profileImageUrl: users.profileImageUrl,
         },
-        ...(requesterId ? {
-          isLikedByMe: sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(Boolean)
-        } : {})
+        ...(requesterId
+          ? {
+              isLikedByMe:
+                sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(
+                  Boolean,
+                ),
+            }
+          : {}),
       })
       .from(comments)
       .innerJoin(users, eq(comments.authorId, users.id))
@@ -132,7 +145,7 @@ class InteractionsService {
 
     const formattedComments = results.map((row) => ({
       ...row,
-      isLikedByMe: 'isLikedByMe' in row ? !!row.isLikedByMe : false,
+      isLikedByMe: "isLikedByMe" in row ? !!row.isLikedByMe : false,
     }));
 
     return { comments: formattedComments, nextCursor };
@@ -142,11 +155,9 @@ class InteractionsService {
     parentCommentId: string,
     limit: number = 20,
     cursor?: string,
-    requesterId?: string
+    requesterId?: string,
   ) {
-    const conditions = [
-      eq(comments.parentCommentId, parentCommentId)
-    ];
+    const conditions = [eq(comments.parentCommentId, parentCommentId)];
 
     if (cursor) {
       conditions.push(lt(comments.createdAt, new Date(cursor)));
@@ -168,14 +179,19 @@ class InteractionsService {
           fullname: users.fullname,
           profileImageUrl: users.profileImageUrl,
         },
-        ...(requesterId ? {
-          isLikedByMe: sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(Boolean)
-        } : {})
+        ...(requesterId
+          ? {
+              isLikedByMe:
+                sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(
+                  Boolean,
+                ),
+            }
+          : {}),
       })
       .from(comments)
       .innerJoin(users, eq(comments.authorId, users.id))
       .where(and(...conditions))
-      .orderBy(desc(comments.createdAt)) 
+      .orderBy(desc(comments.createdAt))
       .limit(limit);
 
     let nextCursor: string | null = null;
@@ -188,7 +204,7 @@ class InteractionsService {
 
     const formattedComments = results.map((row) => ({
       ...row,
-      isLikedByMe: 'isLikedByMe' in row ? !!row.isLikedByMe : false,
+      isLikedByMe: "isLikedByMe" in row ? !!row.isLikedByMe : false,
     }));
 
     return { replies: formattedComments, nextCursor };
@@ -211,9 +227,14 @@ class InteractionsService {
           fullname: users.fullname,
           profileImageUrl: users.profileImageUrl,
         },
-        ...(requesterId ? {
-          isLikedByMe: sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(Boolean)
-        } : {})
+        ...(requesterId
+          ? {
+              isLikedByMe:
+                sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(
+                  Boolean,
+                ),
+            }
+          : {}),
       })
       .from(comments)
       .innerJoin(users, eq(comments.authorId, users.id))
@@ -222,11 +243,14 @@ class InteractionsService {
 
     return {
       ...comment,
-      isLikedByMe: 'isLikedByMe' in comment ? !!comment.isLikedByMe : false,
+      isLikedByMe: "isLikedByMe" in comment ? !!comment.isLikedByMe : false,
     };
   }
 
-  public async likeComment(commentId: string, userId: string): Promise<{ status: "liked" | "unliked" }> {
+  public async likeComment(
+    commentId: string,
+    userId: string,
+  ): Promise<{ status: "liked" | "unliked" }> {
     let resultStatus: "liked" | "unliked";
     let commentAuthorId: string | null = null;
     let relatedPostId: string | null = null;
@@ -246,34 +270,64 @@ class InteractionsService {
       const [existingLike] = await tx
         .select()
         .from(commentLikes)
-        .where(and(eq(commentLikes.commentId, commentId), eq(commentLikes.userId, userId)))
+        .where(
+          and(
+            eq(commentLikes.commentId, commentId),
+            eq(commentLikes.userId, userId),
+          ),
+        )
         .limit(1);
 
       if (existingLike) {
-        await tx.delete(commentLikes).where(and(eq(commentLikes.commentId, commentId), eq(commentLikes.userId, userId)));
-        await tx.update(comments).set({ likeCount: sql`${comments.likeCount} - 1` }).where(eq(comments.id, commentId));
+        await tx
+          .delete(commentLikes)
+          .where(
+            and(
+              eq(commentLikes.commentId, commentId),
+              eq(commentLikes.userId, userId),
+            ),
+          );
+        await tx
+          .update(comments)
+          .set({ likeCount: sql`${comments.likeCount} - 1` })
+          .where(eq(comments.id, commentId));
         resultStatus = "unliked";
       } else {
         await tx.insert(commentLikes).values({ commentId, userId });
-        await tx.update(comments).set({ likeCount: sql`${comments.likeCount} + 1` }).where(eq(comments.id, commentId));
+        await tx
+          .update(comments)
+          .set({ likeCount: sql`${comments.likeCount} + 1` })
+          .where(eq(comments.id, commentId));
         resultStatus = "liked";
       }
     });
 
-    if (resultStatus! === "liked" && commentAuthorId && commentAuthorId !== userId && relatedPostId) {
+    if (
+      resultStatus! === "liked" &&
+      commentAuthorId &&
+      commentAuthorId !== userId &&
+      relatedPostId
+    ) {
       addInteractionJob({
         type: NotificationType.LIKE,
         recipientId: commentAuthorId,
         actorId: userId,
         relatedId: relatedPostId,
         message: "liked your comment.",
-      }).catch((err: unknown) => logger.error("Failed to queue comment like notification", { error: err instanceof Error ? err.message : String(err) }));
+      }).catch((err: unknown) =>
+        logger.error("Failed to queue comment like notification", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
     }
 
     return { status: resultStatus! };
   }
 
-  public async toggleLikePost(postId: string, userId: string): Promise<{ status: "liked" | "unliked" }> {
+  public async toggleLikePost(
+    postId: string,
+    userId: string,
+  ): Promise<{ status: "liked" | "unliked" }> {
     let resultStatus: "liked" | "unliked";
     let postAuthorId: string | null = null;
 
@@ -287,7 +341,7 @@ class InteractionsService {
       if (!post) {
         throw new AppError(HTTP_STATUS.NOT_FOUND, "Post not found");
       }
-      
+
       postAuthorId = post.authorId;
 
       const [existingLike] = await tx
@@ -297,20 +351,33 @@ class InteractionsService {
         .limit(1);
 
       if (existingLike) {
-        await tx.delete(likes).where(and(eq(likes.postId, postId), eq(likes.userId, userId)));
-        await tx.update(posts).set({ likeCount: sql`${posts.likeCount} - 1` }).where(eq(posts.id, postId));
+        await tx
+          .delete(likes)
+          .where(and(eq(likes.postId, postId), eq(likes.userId, userId)));
+        await tx
+          .update(posts)
+          .set({ likeCount: sql`${posts.likeCount} - 1` })
+          .where(eq(posts.id, postId));
         resultStatus = "unliked";
       } else {
         await tx.insert(likes).values({ postId, userId });
-        await tx.update(posts).set({ likeCount: sql`${posts.likeCount} + 1` }).where(eq(posts.id, postId));
+        await tx
+          .update(posts)
+          .set({ likeCount: sql`${posts.likeCount} + 1` })
+          .where(eq(posts.id, postId));
         resultStatus = "liked";
       }
     });
 
     // Notify the author if it's a new like
     if (resultStatus! === "liked" && postAuthorId && postAuthorId !== userId) {
-      notificationService.sendLikeNotification(postAuthorId, userId, postId)
-        .catch((err: unknown) => logger.error("Failed to queue post like notification", { error: err instanceof Error ? err.message : String(err) }));
+      notificationService
+        .sendLikeNotification(postAuthorId, userId, postId)
+        .catch((err: unknown) =>
+          logger.error("Failed to queue post like notification", {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
     }
 
     return { status: resultStatus! };
@@ -332,18 +399,21 @@ class InteractionsService {
     }
 
     if (comment.authorId !== userId && !isAdmin) {
-      throw new AppError(HTTP_STATUS.FORBIDDEN, "Not authorized to delete this comment");
+      throw new AppError(
+        HTTP_STATUS.FORBIDDEN,
+        "Not authorized to delete this comment",
+      );
     }
 
     await db.transaction(async (tx) => {
       await tx.delete(comments).where(eq(comments.id, commentId));
       await tx.execute(
-        sql`UPDATE posts SET comment_count = (SELECT COUNT(*) FROM comments WHERE post_id = ${comment.postId}) WHERE id = ${comment.postId}`
+        sql`UPDATE posts SET comment_count = (SELECT COUNT(*) FROM comments WHERE post_id = ${comment.postId}) WHERE id = ${comment.postId}`,
       );
 
       if (comment.parentCommentId) {
         await tx.execute(
-          sql`UPDATE comments SET reply_count = (SELECT COUNT(*) FROM comments WHERE parent_comment_id = ${comment.parentCommentId}) WHERE id = ${comment.parentCommentId}`
+          sql`UPDATE comments SET reply_count = (SELECT COUNT(*) FROM comments WHERE parent_comment_id = ${comment.parentCommentId}) WHERE id = ${comment.parentCommentId}`,
         );
       }
     });
@@ -352,7 +422,7 @@ class InteractionsService {
   public async updateComment(
     userId: string,
     commentId: string,
-    content: string
+    content: string,
   ) {
     const [comment] = await db
       .select()
@@ -367,7 +437,7 @@ class InteractionsService {
     if (comment.authorId !== userId) {
       throw new AppError(
         HTTP_STATUS.FORBIDDEN,
-        "You are not authorized to edit this comment"
+        "You are not authorized to edit this comment",
       );
     }
 
@@ -379,7 +449,11 @@ class InteractionsService {
     return await this.getCommentById(commentId, userId);
   }
 
-  public async logShare(userId: string, postId: string, platform: string): Promise<void> {
+  public async logShare(
+    userId: string,
+    postId: string,
+    platform: string,
+  ): Promise<void> {
     await db.insert(shares).values({ userId, postId, platform });
 
     const [post] = await db
@@ -389,8 +463,13 @@ class InteractionsService {
       .limit(1);
 
     if (post && post.authorId !== userId) {
-      notificationService.sendShareNotification(post.authorId, userId, postId)
-        .catch((err: unknown) => logger.error("Failed to queue share notification", { error: err instanceof Error ? err.message : String(err) }));
+      notificationService
+        .sendShareNotification(post.authorId, userId, postId)
+        .catch((err: unknown) =>
+          logger.error("Failed to queue share notification", {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
     }
   }
 }

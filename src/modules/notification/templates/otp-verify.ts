@@ -14,5 +14,8 @@ export const otpVerifyTemplate = (data: { email: string; otp: string }) => {
 
   const textContent = `Verify Your Email\n\nPlease use the verification code below to confirm your Writespace account: ${data.email}\n\nVerification Code: ${data.otp}\n\nThis code expires in 10 minutes. If you didn't request this, you can ignore this email.`;
 
-  return { html: baseEmailLayout(htmlContent, "Verify Your Writespace Account"), text: textContent };
+  return {
+    html: baseEmailLayout(htmlContent, "Verify Your Writespace Account"),
+    text: textContent,
+  };
 };

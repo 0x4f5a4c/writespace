@@ -17,8 +17,8 @@ export const commentLikes = pgTable(
   },
   (table) => [
     // Composite primary key ensures a user can only like a specific comment ONCE
-    primaryKey({ columns: [table.commentId, table.userId] })
-  ]
+    primaryKey({ columns: [table.commentId, table.userId] }),
+  ],
 );
 
 export type CommentLike = typeof commentLikes.$inferSelect;

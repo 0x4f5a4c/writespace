@@ -7,12 +7,14 @@ export const CreatePostSchema = z.object({
     content: z.string().optional().default(""),
     tags: z.array(z.string()).optional(),
 
-    codeSnippets: z.array(
-      z.object({
-        language: z.string(),
-        code: z.string(),
-      })
-    ).optional(),
+    codeSnippets: z
+      .array(
+        z.object({
+          language: z.string(),
+          code: z.string(),
+        }),
+      )
+      .optional(),
 
     // Access
     isPublished: z.boolean().default(false),

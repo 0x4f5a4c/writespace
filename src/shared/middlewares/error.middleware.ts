@@ -20,10 +20,10 @@ export const errorHandler = (
   err: unknown,
   req: Request,
   res: Response,
-  _next: NextFunction 
+  _next: NextFunction,
 ): void => {
   let message = "Internal Server Error";
-  
+
   let statusCode: number = HTTP_STATUS.INTERNAL_SERVER_ERROR;
   let stackTrace: string | undefined = undefined;
 

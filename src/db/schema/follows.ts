@@ -16,5 +16,5 @@ export const follows = pgTable(
     // Composite Primary Key guarantees a user cannot follow the same person twice
     // and acts as a high-speed index for lookups.
     pk: primaryKey({ columns: [table.followerId, table.followingId] }),
-  })
+  }),
 );

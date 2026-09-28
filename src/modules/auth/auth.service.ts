@@ -141,7 +141,8 @@ class AuthService {
     profile: IOAuthProfile,
     providerField: "googleAuth" | "githubAuth",
   ) {
-    const safeEmail = profile.email || `${profile.providerId}@missing.${profile.provider}.com`;
+    const safeEmail =
+      profile.email || `${profile.providerId}@missing.${profile.provider}.com`;
 
     const [existingUser] = await db
       .select()
@@ -198,7 +199,7 @@ class AuthService {
 
     const redisKey = `refresh_token:${decoded.id}:${oldRefreshToken}`;
     const isValid = await redis.get(redisKey);
-    
+
     if (!isValid) {
       throw new AppError(
         HTTP_STATUS.UNAUTHORIZED,
@@ -230,7 +231,7 @@ class AuthService {
 
       await redis.del(`refresh_token:${decoded.id}:${refreshToken}`);
     } catch (error: unknown) {
-       logger.warn("Logout attempted with invalid refresh token", { error });
+      logger.warn("Logout attempted with invalid refresh token", { error });
     }
   }
 
@@ -287,7 +288,7 @@ class AuthService {
 
     for await (const key of redis.scanIterator({
       MATCH: `refresh_token:${userId}:*`,
-      COUNT: 100
+      COUNT: 100,
     })) {
       await redis.del(key);
     }
@@ -302,23 +303,32 @@ class AuthService {
 
   public async updatePassword(userId: string, data: UpdatePasswordInput) {
     const [user] = await db
-      .select({ 
-        id: users.id, 
-        passwordHash: users.passwordHash, 
-        email: users.email, 
-        username: users.username 
+      .select({
+        id: users.id,
+        passwordHash: users.passwordHash,
+        email: users.email,
+        username: users.username,
       })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
 
     if (!user || !user.passwordHash) {
-      throw new AppError(HTTP_STATUS.BAD_REQUEST, "User not found or uses social login without a password.");
+      throw new AppError(
+        HTTP_STATUS.BAD_REQUEST,
+        "User not found or uses social login without a password.",
+      );
     }
 
-    const isMatch = await bcrypt.compare(data.currentPassword, user.passwordHash);
+    const isMatch = await bcrypt.compare(
+      data.currentPassword,
+      user.passwordHash,
+    );
     if (!isMatch) {
-      throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Incorrect current password");
+      throw new AppError(
+        HTTP_STATUS.UNAUTHORIZED,
+        "Incorrect current password",
+      );
     }
 
     const newPasswordHash = await bcrypt.hash(data.newPassword, SALT_ROUNDS);
@@ -330,12 +340,15 @@ class AuthService {
 
     for await (const key of redis.scanIterator({
       MATCH: `refresh_token:${userId}:*`,
-      COUNT: 100
+      COUNT: 100,
     })) {
       await redis.del(key);
     }
 
-    await notificationService.sendPasswordUpdateEmail(user.email, user.username);
+    await notificationService.sendPasswordUpdateEmail(
+      user.email,
+      user.username,
+    );
 
     return { message: "Password updated successfully" };
   }

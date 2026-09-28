@@ -50,6 +50,13 @@
       "when": 1774686576929,
       "tag": "0006_ancient_talon",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790612303206,
+      "tag": "0007_slippery_shooting_star",
+      "breakpoints": true
     }
   ]
 }

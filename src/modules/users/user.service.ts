@@ -18,24 +18,33 @@ export interface UsernameAvailability {
 
 export class UserService {
   private static toPublicUser(user: User): PublicUser {
-    const { passwordHash, loginAttempts, lockUntil, googleAuth, githubAuth, ...publicFields } = user;
-    
+    const {
+      passwordHash,
+      loginAttempts,
+      lockUntil,
+      googleAuth,
+      githubAuth,
+      ...publicFields
+    } = user;
+
     // Satisfy the compiler that we intentionally omitted these from the return object
     void passwordHash;
     void loginAttempts;
     void lockUntil;
     void googleAuth;
     void githubAuth;
-    
+
     return publicFields as unknown as PublicUser;
   }
 
-  public static async checkUsernameAvailability(username: string): Promise<UsernameAvailability> {
+  public static async checkUsernameAvailability(
+    username: string,
+  ): Promise<UsernameAvailability> {
     const normalizedUsername = username.toLowerCase();
-    
+
     const existing = await db.query.users.findFirst({
       where: eq(users.username, normalizedUsername),
-      columns: { id: true }
+      columns: { id: true },
     });
 
     if (!existing) return { available: true };
@@ -45,7 +54,7 @@ export class UserService {
       const candidate = `${normalizedUsername}${Math.floor(Math.random() * 900) + 100}`;
       const isTaken = await db.query.users.findFirst({
         where: eq(users.username, candidate),
-        columns: { id: true }
+        columns: { id: true },
       });
       if (!isTaken) suggestions.push(candidate);
     }
@@ -64,22 +73,25 @@ export class UserService {
     const results = await db.query.users.findMany({
       where: or(
         ilike(users.username, searchPattern),
-        ilike(users.fullname, searchPattern)
+        ilike(users.fullname, searchPattern),
       ),
       columns: {
         id: true,
         username: true,
         fullname: true,
         profileImageUrl: true,
-        headline: true
+        headline: true,
       },
-      limit: limitCount
+      limit: limitCount,
     });
 
     return results;
   }
 
-  public static async getUserProfile(username: string, currentUserId?: string): Promise<PublicUser & { isFollowingByMe: boolean }> {
+  public static async getUserProfile(
+    username: string,
+    currentUserId?: string,
+  ): Promise<PublicUser & { isFollowingByMe: boolean }> {
     const user = await db.query.users.findFirst({
       where: eq(users.username, username),
     });
@@ -91,8 +103,13 @@ export class UserService {
       const [followRecord] = await db
         .select()
         .from(follows)
-        .where(and(eq(follows.followerId, currentUserId), eq(follows.followingId, user.id)));
-      
+        .where(
+          and(
+            eq(follows.followerId, currentUserId),
+            eq(follows.followingId, user.id),
+          ),
+        );
+
       if (followRecord) isFollowingByMe = true;
     }
 
@@ -106,32 +123,51 @@ export class UserService {
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
     });
-    
-    if (!user) throw new AppError(HTTP_STATUS.NOT_FOUND, "User session invalid");
+
+    if (!user)
+      throw new AppError(HTTP_STATUS.NOT_FOUND, "User session invalid");
     return this.toPublicUser(user);
   }
 
-  public static async updateUser(userId: string, updateData: UpdateProfileDto, mediaPaths?: { profileImage?: string; bannerImage?: string }): Promise<PublicUser> {
+  public static async updateUser(
+    userId: string,
+    updateData: UpdateProfileDto,
+    mediaPaths?: {
+      profileImage?: { url: string; publicId: string };
+      bannerImage?: { url: string; publicId: string };
+    },
+  ): Promise<PublicUser> {
     const sanitized: Partial<User> = {};
     let isCriticalUpdate = false;
 
     // 1. Extract Personal Info
     if (updateData.personal_info) {
       const { fullname, bio, headline, location } = updateData.personal_info;
-      
+
       if (fullname !== undefined) {
         sanitized.fullname = fullname;
         isCriticalUpdate = true; // Name change warrants an email
       }
-      
+
       if (bio !== undefined) sanitized.bio = bio;
       if (headline !== undefined) sanitized.headline = headline;
-      if (location !== undefined) sanitized.location = location; 
+      if (location !== undefined) sanitized.location = location;
     }
 
     // 2. Extract Social Links
     if (updateData.social_links) {
-      const { website, github, twitter, linkedin, instagram, youtube, facebook, leetcode, geeksforgeeks, codeforces } = updateData.social_links;
+      const {
+        website,
+        github,
+        twitter,
+        linkedin,
+        instagram,
+        youtube,
+        facebook,
+        leetcode,
+        geeksforgeeks,
+        codeforces,
+      } = updateData.social_links;
       if (website !== undefined) sanitized.website = website;
       if (github !== undefined) sanitized.github = github;
       if (twitter !== undefined) sanitized.twitter = twitter;
@@ -144,38 +180,47 @@ export class UserService {
       if (codeforces !== undefined) sanitized.codeforces = codeforces;
     }
 
-    // 3. Extract Media Paths
+    // 3. Extract Media Paths (Cloudinary)
     if (mediaPaths?.profileImage) {
-      const formattedPath = mediaPaths.profileImage.replace(/\\/g, '/');
-      sanitized.profileImageUrl = formattedPath.startsWith('/uploads/') ? formattedPath : `/${formattedPath}`;
+      sanitized.profileImageUrl = mediaPaths.profileImage.url;
+      sanitized.profileImagePublicId = mediaPaths.profileImage.publicId;
     }
 
     if (mediaPaths?.bannerImage) {
-      const formattedPath = mediaPaths.bannerImage.replace(/\\/g, '/');
-      sanitized.bannerImageUrl = formattedPath.startsWith('/uploads/') ? formattedPath : `/${formattedPath}`;
+      sanitized.bannerImageUrl = mediaPaths.bannerImage.url;
+      sanitized.bannerImagePublicId = mediaPaths.bannerImage.publicId;
     }
 
     if (Object.keys(sanitized).length === 0) {
-      throw new AppError(HTTP_STATUS.BAD_REQUEST, "No valid fields provided for update");
+      throw new AppError(
+        HTTP_STATUS.BAD_REQUEST,
+        "No valid fields provided for update",
+      );
     }
 
-    const [updated] = await db.update(users)
+    const [updated] = await db
+      .update(users)
       .set({ ...sanitized, updatedAt: new Date() })
       .where(eq(users.id, userId))
       .returning();
 
-    if (!updated) throw new AppError(HTTP_STATUS.NOT_FOUND, "User not found during update");
+    if (!updated)
+      throw new AppError(HTTP_STATUS.NOT_FOUND, "User not found during update");
 
     if (isCriticalUpdate) {
-      notificationService.sendProfileUpdateEmail(updated.email, updated.username)
-        .catch(err => console.error("Failed to send profile update email:", err));
+      notificationService
+        .sendProfileUpdateEmail(updated.email, updated.username)
+        .catch((err) =>
+          console.error("Failed to send profile update email:", err),
+        );
     }
 
     return this.toPublicUser(updated);
   }
 
   public static async deleteUser(userId: string): Promise<void> {
-    const [user] = await db.update(users)
+    const [user] = await db
+      .update(users)
       .set({ status: "suspended" })
       .where(eq(users.id, userId))
       .returning({ id: users.id });
@@ -183,7 +228,10 @@ export class UserService {
     if (!user) throw new AppError(HTTP_STATUS.NOT_FOUND, "User not found");
   }
 
-  public static async toggleFollow(currentUserId: string, targetUserId: string): Promise<{ status: "followed" | "unfollowed" }> {
+  public static async toggleFollow(
+    currentUserId: string,
+    targetUserId: string,
+  ): Promise<{ status: "followed" | "unfollowed" }> {
     if (currentUserId === targetUserId) {
       throw new AppError(HTTP_STATUS.BAD_REQUEST, "You cannot follow yourself");
     }
@@ -199,32 +247,39 @@ export class UserService {
     const existingFollow = await db.query.follows.findFirst({
       where: and(
         eq(follows.followerId, currentUserId),
-        eq(follows.followingId, targetUserId)
+        eq(follows.followingId, targetUserId),
       ),
     });
 
     // Unfollow Logic
     if (existingFollow) {
       await db.transaction(async (tx) => {
-        await tx.delete(follows).where(
-          and(
-            eq(follows.followerId, currentUserId),
-            eq(follows.followingId, targetUserId)
-          )
-        );
-        
-        await tx.update(users)
-          .set({ totalFollowers: sql`GREATEST(${users.totalFollowers} - 1, 0)` })
+        await tx
+          .delete(follows)
+          .where(
+            and(
+              eq(follows.followerId, currentUserId),
+              eq(follows.followingId, targetUserId),
+            ),
+          );
+
+        await tx
+          .update(users)
+          .set({
+            totalFollowers: sql`GREATEST(${users.totalFollowers} - 1, 0)`,
+          })
           .where(eq(users.id, targetUserId));
-          
-        await tx.update(users)
-          .set({ totalFollowing: sql`GREATEST(${users.totalFollowing} - 1, 0)` })
+
+        await tx
+          .update(users)
+          .set({
+            totalFollowing: sql`GREATEST(${users.totalFollowing} - 1, 0)`,
+          })
           .where(eq(users.id, currentUserId));
       });
 
       return { status: "unfollowed" };
-      
-    } 
+    }
     // Follow Logic
     else {
       await db.transaction(async (tx) => {
@@ -233,11 +288,13 @@ export class UserService {
           followingId: targetUserId,
         });
 
-        await tx.update(users)
+        await tx
+          .update(users)
           .set({ totalFollowers: sql`${users.totalFollowers} + 1` })
           .where(eq(users.id, targetUserId));
-          
-        await tx.update(users)
+
+        await tx
+          .update(users)
           .set({ totalFollowing: sql`${users.totalFollowing} + 1` })
           .where(eq(users.id, currentUserId));
       });
@@ -263,12 +320,15 @@ export class UserService {
         username: true,
         fullname: true,
         headline: true,
-        profileImageUrl: true
-      }
+        profileImageUrl: true,
+      },
     });
 
     if (!user) {
-      throw new AppError(HTTP_STATUS.NOT_FOUND, "User not found for OG generation");
+      throw new AppError(
+        HTTP_STATUS.NOT_FOUND,
+        "User not found for OG generation",
+      );
     }
 
     return user;

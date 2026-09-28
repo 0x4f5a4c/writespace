@@ -6,19 +6,22 @@ import { Request, Response, NextFunction } from "express";
  * Detects stringified JSON arrays/objects in req.body and parses them back into native JavaScript objects
  * before they reach the Zod validation layer. 100% Type Safe.
  */
-export const parseFormDataJson = (req: Request, res: Response, next: NextFunction): void => {
+export const parseFormDataJson = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void => {
   // 1. Only process if the request is multipart/form-data
   if (req.headers["content-type"]?.includes("multipart/form-data")) {
-    
     // 2. Safely type assert req.body as a generic dictionary to avoid 'any'
     const body = req.body as Record<string, unknown>;
 
     // 3. Define the specific fields we expect to be stringified JSON
     const jsonFields = [
-      "tags", 
-      "codeSnippets", 
-      "personal_info", 
-      "social_links"
+      "tags",
+      "codeSnippets",
+      "personal_info",
+      "social_links",
     ];
 
     jsonFields.forEach((field) => {
@@ -32,7 +35,9 @@ export const parseFormDataJson = (req: Request, res: Response, next: NextFunctio
           // We do NOT throw an error here. We let the Zod validation layer (which runs next)
           // catch the type mismatch and return a standard 400 Bad Request to the user.
           if (error instanceof Error) {
-            console.warn(`[ParseFormData] Failed to parse field '${field}': ${error.message}`);
+            console.warn(
+              `[ParseFormData] Failed to parse field '${field}': ${error.message}`,
+            );
           }
         }
       }
@@ -46,6 +51,6 @@ export const parseFormDataJson = (req: Request, res: Response, next: NextFunctio
     // 5. Reassign the parsed body back to req.body
     req.body = body;
   }
-  
+
   next();
 };

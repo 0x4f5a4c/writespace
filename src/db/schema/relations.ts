@@ -6,15 +6,19 @@ import { likes } from "./likes";
 import { shares } from "./shares";
 import { notifications } from "./notifications";
 import { follows } from "./follows";
-import { commentLikes } from "./comment-likes"
+import { commentLikes } from "./comment-likes";
 
 export const usersRelations = relations(users, ({ many }) => ({
   posts: many(posts),
   comments: many(comments),
   likes: many(likes),
   commentLikes: many(commentLikes),
-  notificationsReceived: many(notifications, { relationName: "notifications_received" }),
-  notificationsTriggered: many(notifications, { relationName: "notifications_triggered" }),
+  notificationsReceived: many(notifications, {
+    relationName: "notifications_received",
+  }),
+  notificationsTriggered: many(notifications, {
+    relationName: "notifications_triggered",
+  }),
   followers: many(follows, { relationName: "user_followers" }), // Users following this user
   following: many(follows, { relationName: "user_following" }), // Users this user follows
 }));
@@ -69,4 +73,3 @@ export const followsRelations = relations(follows, ({ one }) => ({
     relationName: "user_followers",
   }),
 }));
-

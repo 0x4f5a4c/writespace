@@ -1,6 +1,12 @@
 import passport from "passport";
-import { Strategy as GoogleStrategy, Profile as GoogleProfile } from "passport-google-oauth20";
-import { Strategy as GitHubStrategy, Profile as GitHubProfile } from "passport-github2";
+import {
+  Strategy as GoogleStrategy,
+  Profile as GoogleProfile,
+} from "passport-google-oauth20";
+import {
+  Strategy as GitHubStrategy,
+  Profile as GitHubProfile,
+} from "passport-github2";
 import env from "../../config/env";
 import { randomInt } from "crypto";
 
@@ -12,8 +18,10 @@ export const generateOTP = (length: number = 6): string => {
   return otp;
 };
 
-
-type PassportDoneCallback = (error: Error | null, user?: Express.User | false) => void;
+type PassportDoneCallback = (
+  error: Error | null,
+  user?: Express.User | false,
+) => void;
 
 /**
  * Configures Passport Strategies for OAuth.
@@ -30,10 +38,10 @@ export const configurePassport = () => {
           callbackURL: `${env.SERVER_URL}/auth/google/callback`,
         },
         (
-          _accessToken: string, 
-          _refreshToken: string, 
-          profile: GoogleProfile, 
-          done: PassportDoneCallback
+          _accessToken: string,
+          _refreshToken: string,
+          profile: GoogleProfile,
+          done: PassportDoneCallback,
         ) => {
           // Pass profile to controller/service
           return done(null, profile as unknown as Express.User);
@@ -53,10 +61,10 @@ export const configurePassport = () => {
           scope: ["user:email"],
         },
         (
-          _accessToken: string, 
-          _refreshToken: string, 
-          profile: GitHubProfile, 
-          done: PassportDoneCallback
+          _accessToken: string,
+          _refreshToken: string,
+          profile: GitHubProfile,
+          done: PassportDoneCallback,
         ) => {
           return done(null, profile as unknown as Express.User);
         },

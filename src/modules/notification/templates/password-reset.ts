@@ -1,6 +1,9 @@
 import { baseEmailLayout } from "./layout";
 
-export const passwordResetTemplate = (data: { username: string; resetLink: string }) => {
+export const passwordResetTemplate = (data: {
+  username: string;
+  resetLink: string;
+}) => {
   const htmlContent = `
     <div>
       <h2 style="color: #0f172a; margin-bottom: 16px;">Password Reset Request</h2>
@@ -14,5 +17,8 @@ export const passwordResetTemplate = (data: { username: string; resetLink: strin
 
   const textContent = `Password Reset Request\n\nHi ${data.username},\n\nWe received a request to reset the password for your Writespace account. If you made this request, click the link below to set a new password:\n\n${data.resetLink}\n\nIf you didn't request a password reset, you can safely ignore this email.`;
 
-  return { html: baseEmailLayout(htmlContent, "Reset Your Password - Writespace"), text: textContent };
+  return {
+    html: baseEmailLayout(htmlContent, "Reset Your Password - Writespace"),
+    text: textContent,
+  };
 };

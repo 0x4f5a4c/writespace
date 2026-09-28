@@ -5,8 +5,8 @@ import { NotificationType } from "@modules/notification/interface/notification.i
 export interface IInteractionJob {
   type: NotificationType;
   recipientId: string;
-  actorId?: string; 
-  relatedId?: string; 
+  actorId?: string;
+  relatedId?: string;
   message: string;
 }
 
@@ -20,14 +20,16 @@ export const interactionQueue = new Queue<IInteractionJob>(
   },
 );
 
-export const addInteractionJob = async (job: IInteractionJob): Promise<void> => {
+export const addInteractionJob = async (
+  job: IInteractionJob,
+): Promise<void> => {
   await interactionQueue.add("process-interaction", job, {
     attempts: 2,
     backoff: {
       type: "fixed",
       delay: 1000,
     },
-    removeOnComplete: true, 
+    removeOnComplete: true,
     removeOnFail: false,
   });
 };

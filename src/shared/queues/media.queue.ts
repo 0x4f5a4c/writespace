@@ -9,16 +9,30 @@ const redisConnectionOptions = {
   password: env.REDIS_PASSWORD || redisUrl.password || undefined,
 };
 
-export const mediaQueue = new Queue("media-cleanup", { 
-  connection: redisConnectionOptions 
+export const mediaQueue = new Queue("media-cleanup", {
+  connection: redisConnectionOptions,
 });
 
-export const addMediaCleanupJob = async (fileUrls: string[]): Promise<void> => {
-  if (fileUrls.length === 0) return;
-  
-  await mediaQueue.add("cleanup", { fileUrls }, { 
-    removeOnComplete: true,
-    attempts: 3,
-    backoff: { type: "exponential", delay: 1000 }
-  });
+/**
+ * Enqueue a Cloudinary cleanup job.
+ *
+ * @param publicIds - Cloudinary `public_id` values to destroy.
+ *                    Do NOT pass URLs here — Cloudinary's destroy API
+ *                    requires the public_id, not the secure_url.
+ */
+export const addMediaCleanupJob = async (
+  publicIds: string[],
+): Promise<void> => {
+  const filtered = publicIds.filter((id) => id && id.trim().length > 0);
+  if (filtered.length === 0) return;
+
+  await mediaQueue.add(
+    "cleanup",
+    { publicIds: filtered },
+    {
+      removeOnComplete: true,
+      attempts: 3,
+      backoff: { type: "exponential", delay: 1000 },
+    },
+  );
 };

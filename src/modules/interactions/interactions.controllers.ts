@@ -9,7 +9,7 @@ import { AppError } from "@shared/utils/app.error";
 interface AuthRequest<
   ReqBody = unknown,
   ReqQuery = Record<string, string | undefined>,
-  ReqParams = Record<string, string>
+  ReqParams = Record<string, string>,
 > extends Request<ReqParams, unknown, ReqBody, ReqQuery> {
   user?: PublicUser;
 }
@@ -30,7 +30,7 @@ class InteractionsController {
         postId,
         data,
       );
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.CREATED,
@@ -43,7 +43,11 @@ class InteractionsController {
   };
 
   public getTopLevelComments = async (
-    req: AuthRequest<unknown, { cursor?: string; limit?: string }, { postId: string }>,
+    req: AuthRequest<
+      unknown,
+      { cursor?: string; limit?: string },
+      { postId: string }
+    >,
     res: Response,
     next: NextFunction,
   ) => {
@@ -51,15 +55,15 @@ class InteractionsController {
       const postId = req.params.postId;
       const limit = parseInt(req.query.limit || "20", 10);
       const cursor = req.query.cursor;
-      const requesterId = req.user?.id; 
+      const requesterId = req.user?.id;
 
       const data = await interactionsService.getTopLevelComments(
         postId,
         limit,
         cursor,
-        requesterId
+        requesterId,
       );
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
@@ -72,7 +76,11 @@ class InteractionsController {
   };
 
   public getCommentReplies = async (
-    req: AuthRequest<unknown, { cursor?: string; limit?: string }, { commentId: string }>,
+    req: AuthRequest<
+      unknown,
+      { cursor?: string; limit?: string },
+      { commentId: string }
+    >,
     res: Response,
     next: NextFunction,
   ) => {
@@ -86,9 +94,9 @@ class InteractionsController {
         commentId,
         limit,
         cursor,
-        requesterId
+        requesterId,
       );
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
@@ -110,7 +118,7 @@ class InteractionsController {
       const commentId = req.params.commentId;
 
       const result = await interactionsService.likeComment(commentId, userId);
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
@@ -132,7 +140,7 @@ class InteractionsController {
       const postId = req.params.postId;
 
       const result = await interactionsService.toggleLikePost(postId, userId);
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
@@ -155,7 +163,7 @@ class InteractionsController {
       const isAdmin = req.user?.role === "admin";
 
       await interactionsService.deleteComment(userId, commentId, isAdmin);
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
@@ -178,15 +186,18 @@ class InteractionsController {
       const { content } = req.body;
 
       if (!content || content.trim().length === 0) {
-        throw new AppError(HTTP_STATUS.BAD_REQUEST, "Comment content cannot be empty");
+        throw new AppError(
+          HTTP_STATUS.BAD_REQUEST,
+          "Comment content cannot be empty",
+        );
       }
 
       const updatedComment = await interactionsService.updateComment(
         userId,
         commentId,
-        content
+        content,
       );
-      
+
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
