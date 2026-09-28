@@ -15,7 +15,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "docs": "ts-node src/scripts/generate-docs.ts"
+    "db:seed": "ts-node -r tsconfig-paths/register src/scripts/seed.ts"
   },
   "keywords": [],
   "author": "",
