@@ -14,11 +14,14 @@ import { AppError } from "@shared/utils/app.error";
 import env from "@config/env";
 
 // Cookie Config (HttpOnly)
+const isProd = process.env.NODE_ENV === "production";
+
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: env.NODE_ENV === "production", // Only secure in prod
-  sameSite: "strict" as const,
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 Days
+  secure: isProd,
+  sameSite: isProd ? ("none" as const) : ("lax" as const),
+  path: "/",
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days, matching JWT_REFRESH_EXPIRE
 };
 
 type EmptyParams = Record<string, never>;
