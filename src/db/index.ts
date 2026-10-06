@@ -1,16 +1,23 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import env from "../config/env";
+import logger from "../config/logger";
 import * as schema from "./schema";
 
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
-  // SCALABILITY FIX: Increase max connections for 1000 concurrent users.
-  // Fallback to 50 if env variable isn't set.
-  max: process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX) : 50,
-  min: 5, // Keep a few connections warm
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  max: env.DB_POOL_MAX,
+  min: env.DB_POOL_MIN,
+  idleTimeoutMillis: env.DB_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
 });
 
-export const db = drizzle(pool, { schema });
+pool.on("error", (error) => {
+  logger.error("Unexpected PostgreSQL pool error", {
+    error,
+  });
+});
+
+export const db = drizzle(pool, {
+  schema,
+});
