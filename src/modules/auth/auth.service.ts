@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { eq, or } from "drizzle-orm";
 import { db } from "../../db";
-import { users } from "../../db/schema";
+import { users, type User } from "../../db/schema";
 import { client as redis } from "@config/redis";
 import env from "@config/env";
 import { AppError } from "@shared/utils/app.error";
@@ -122,6 +122,8 @@ class AuthService {
       throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid email or password");
     }
 
+    this.ensureAccountIsActive(user.status);
+
     const tokens = await this.signTokens(user.id, user.role);
 
     await notificationService.sendLoginAlert(
@@ -158,6 +160,7 @@ class AuthService {
       .limit(1);
 
     if (existingUser) {
+      this.ensureAccountIsActive(existingUser.status);
       if (!existingUser[providerField]) {
         await db
           .update(users)
@@ -205,7 +208,7 @@ class AuthService {
     }
 
     const redisKey = `refresh_token:${decoded.id}:${oldRefreshToken}`;
-    const isValid = await redis.get(redisKey);
+    const isValid = await redis.getDel(redisKey);
 
     if (!isValid) {
       throw new AppError(
@@ -214,10 +217,8 @@ class AuthService {
       );
     }
 
-    await redis.del(redisKey);
-
     const [user] = await db
-      .select({ id: users.id, role: users.role })
+      .select({ id: users.id, role: users.role, status: users.status })
       .from(users)
       .where(eq(users.id, decoded.id))
       .limit(1);
@@ -225,6 +226,8 @@ class AuthService {
     if (!user) {
       throw new AppError(HTTP_STATUS.UNAUTHORIZED, "User not found");
     }
+
+    this.ensureAccountIsActive(user.status);
 
     return this.signTokens(user.id, user.role);
   }
@@ -293,12 +296,7 @@ class AuthService {
     await db.update(users).set({ passwordHash }).where(eq(users.id, userId));
     await redis.del(`password_reset:${token}`);
 
-    for await (const key of redis.scanIterator({
-      MATCH: `refresh_token:${userId}:*`,
-      COUNT: 100,
-    })) {
-      await redis.del(key);
-    }
+    await this.revokeAllRefreshTokens(userId);
 
     await notificationService.sendPasswordUpdateEmail(
       user.email,
@@ -345,12 +343,7 @@ class AuthService {
       .set({ passwordHash: newPasswordHash })
       .where(eq(users.id, userId));
 
-    for await (const key of redis.scanIterator({
-      MATCH: `refresh_token:${userId}:*`,
-      COUNT: 100,
-    })) {
-      await redis.del(key);
-    }
+    await this.revokeAllRefreshTokens(userId);
 
     await notificationService.sendPasswordUpdateEmail(
       user.email,
@@ -379,6 +372,28 @@ class AuthService {
     });
 
     return { accessToken, refreshToken };
+  }
+
+  private ensureAccountIsActive(status: User["status"]): void {
+    if (status === "banned") {
+      throw new AppError(HTTP_STATUS.FORBIDDEN, "Your account has been banned");
+    }
+
+    if (status === "suspended") {
+      throw new AppError(
+        HTTP_STATUS.FORBIDDEN,
+        "Your account has been suspended",
+      );
+    }
+  }
+
+  private async revokeAllRefreshTokens(userId: string): Promise<void> {
+    for await (const key of redis.scanIterator({
+      MATCH: `refresh_token:${userId}:*`,
+      COUNT: 100,
+    })) {
+      await redis.del(key);
+    }
   }
 }
 
