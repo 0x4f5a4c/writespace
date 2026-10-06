@@ -5,6 +5,7 @@ import { notifications, users } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { type IInteractionJob } from "./interaction.queue";
 import logger from "@config/logger";
+import { bullmqRedisConnection } from "@config/bullmq";
 
 export const interactionWorker = new Worker<IInteractionJob>(
   "interaction-queue",
@@ -35,11 +36,8 @@ export const interactionWorker = new Worker<IInteractionJob>(
     });
   },
   {
-    connection: {
-      url: env.REDIS_URL,
-      password: env.REDIS_PASSWORD,
-    },
-    concurrency: 10,
+    connection: bullmqRedisConnection,
+    concurrency: env.MEDIA_WORKER_CONCURRENCY,
   },
 );
 
