@@ -5,10 +5,15 @@ import logger from "./logger";
 export const client: RedisClientType = createClient({
   url: env.REDIS_URL,
   password: env.REDIS_PASSWORD,
+  socket: {
+    connectTimeout: env.REDIS_CONNECT_TIMEOUT_MS,
+  },
 });
 
 client.on("error", (err: Error) => {
-  logger.error(`Redis Client Error:`, err);
+  logger.error("Redis client error", {
+    error: err,
+  });
 });
 
 /**
@@ -16,15 +21,15 @@ client.on("error", (err: Error) => {
  */
 
 client.on("connect", () => {
-  logger.info(`Redis connection process initiated`);
+  logger.info("Redis connection process initiated");
 });
 
 client.on("ready", () => {
-  logger.info(`Redis ready and connected successfully`);
+  logger.info("Redis ready and connected successfully");
 });
 
 client.on("reconnecting", () => {
-  logger.info(`Redis reconnecting...`);
+  logger.warn("Redis reconnecting...");
 });
 
 /**
@@ -32,5 +37,9 @@ client.on("reconnecting", () => {
  * @returns A promise that resolves when the client is connected and ready.
  */
 export const connectRedis = async (): Promise<void> => {
+  if (client.isOpen) {
+    return;
+  }
+
   await client.connect();
 };

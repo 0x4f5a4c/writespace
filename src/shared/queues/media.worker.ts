@@ -1,15 +1,8 @@
 import { Worker, Job } from "bullmq";
 import logger from "@config/logger";
 import env from "@config/env";
+import { bullmqRedisConnection } from "@config/bullmq";
 import { v2 as cloudinary } from "cloudinary";
-
-// Parse the REDIS_URL from env.ts to extract host and port for BullMQ
-const redisUrl = new URL(env.REDIS_URL);
-const redisConnectionOptions = {
-  host: redisUrl.hostname,
-  port: parseInt(redisUrl.port || "6379", 10),
-  password: env.REDIS_PASSWORD || redisUrl.password || undefined,
-};
 
 // Cloudinary client
 cloudinary.config({
@@ -52,7 +45,10 @@ export const mediaWorker = new Worker(
       }
     }
   },
-  { connection: redisConnectionOptions },
+  {
+    connection: bullmqRedisConnection,
+    concurrency: env.MEDIA_WORKER_CONCURRENCY,
+  },
 );
 
 mediaWorker.on("failed", (job: Job | undefined, err: Error) => {

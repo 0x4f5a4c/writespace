@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import env from "@config/env";
+import { bullmqRedisConnection } from "@config/bullmq";
 import { NotificationType } from "@modules/notification/interface/notification.interface";
 
 export interface IInteractionJob {
@@ -13,10 +13,7 @@ export interface IInteractionJob {
 export const interactionQueue = new Queue<IInteractionJob>(
   "interaction-queue",
   {
-    connection: {
-      url: env.REDIS_URL,
-      password: env.REDIS_PASSWORD,
-    },
+    connection: bullmqRedisConnection,
   },
 );
 

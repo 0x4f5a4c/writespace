@@ -1,6 +1,7 @@
 import { Worker } from "bullmq";
 import { mailer } from "../infra/mailer";
 import env from "@config/env";
+import { bullmqRedisConnection } from "@config/bullmq";
 import { IEmailPayload } from "@modules/notification/interface/email.interface";
 import logger from "@config/logger";
 
@@ -29,11 +30,8 @@ export const emailWorker = new Worker<IEmailPayload>(
     });
   },
   {
-    connection: {
-      url: env.REDIS_URL,
-      password: env.REDIS_PASSWORD,
-    },
-    concurrency: 5,
+    connection: bullmqRedisConnection,
+    concurrency: env.EMAIL_WORKER_CONCURRENCY,
   },
 );
 

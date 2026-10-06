@@ -1,14 +1,11 @@
 import { Queue } from "bullmq";
-import env from "@config/env";
+import { bullmqRedisConnection } from "@config/bullmq";
 import { IEmailPayload } from "@modules/notification/interface/email.interface";
 
 // 1. Create the Queue instance
 // Note: connection options are passed from the shared redis config or directly here
 export const emailQueue = new Queue<IEmailPayload>("email-queue", {
-  connection: {
-    url: env.REDIS_URL,
-    password: env.REDIS_PASSWORD,
-  },
+  connection: bullmqRedisConnection,
 });
 
 /**
