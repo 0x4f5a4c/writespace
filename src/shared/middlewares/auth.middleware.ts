@@ -5,11 +5,21 @@ import { HTTP_STATUS } from "../constants/http-codes";
 import { IJwtPayload } from "@modules/auth/interface/auth.interface";
 import env from "@config/env";
 
+const isValidJwtPayload = (payload: unknown): payload is IJwtPayload => {
+  if (typeof payload !== "object" || payload === null) {
+    return false;
+  }
+
+  const data = payload as Record<string, unknown>;
+
+  return typeof data.id === "string" && typeof data.role === "string";
+};
+
 export const authenticate = async (
   req: Request,
-  res: Response,
+  _res: Response,
   next: NextFunction,
-) => {
+): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
 
@@ -20,9 +30,20 @@ export const authenticate = async (
       );
     }
 
-    const token = authHeader.split(" ")[1];
+    const token = authHeader.slice(7).trim();
 
-    const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET) as IJwtPayload;
+    if (!token) {
+      throw new AppError(
+        HTTP_STATUS.UNAUTHORIZED,
+        "No token provided, authorization denied",
+      );
+    }
+
+    const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET);
+
+    if (!isValidJwtPayload(decoded)) {
+      throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid token payload");
+    }
 
     req.user = {
       id: decoded.id,
@@ -31,10 +52,12 @@ export const authenticate = async (
 
     next();
   } catch (error) {
-    if (error instanceof jwt.JsonWebTokenError) {
-      next(new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid token"));
-    } else if (error instanceof jwt.TokenExpiredError) {
+    // TokenExpiredError extends JsonWebTokenError,
+    // so it must be checked first.
+    if (error instanceof jwt.TokenExpiredError) {
       next(new AppError(HTTP_STATUS.UNAUTHORIZED, "Token expired"));
+    } else if (error instanceof jwt.JsonWebTokenError) {
+      next(new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid token"));
     } else {
       next(error);
     }
@@ -43,35 +66,36 @@ export const authenticate = async (
 
 /**
  * RBAC Middleware to restrict access to specific roles.
- * usage: authorize('admin') or authorize('admin', 'user')
  *
- * Note: req.user is set from the decoded JWT in `authenticate`,
- * which contains { id, role } at the top level.
+ * Usage:
+ * authorize("admin")
+ * authorize("admin", "user")
+ *
+ * Note:
+ * req.user is populated by authenticate().
  */
 export const authorize = (...allowedRoles: string[]) => {
-  return (
-    req: Request<{ role: string }>,
-    res: Response,
-    next: NextFunction,
-  ) => {
+  return (req: Request, _res: Response, next: NextFunction): void => {
     const userRole = req.user?.role;
 
     if (!userRole) {
-      return next(
+      next(
         new AppError(
           HTTP_STATUS.FORBIDDEN,
           "Access Forbidden: User role not defined",
         ),
       );
+      return;
     }
 
     if (!allowedRoles.includes(userRole)) {
-      return next(
+      next(
         new AppError(
           HTTP_STATUS.FORBIDDEN,
           "Access Forbidden: Insufficient permissions",
         ),
       );
+      return;
     }
 
     next();
