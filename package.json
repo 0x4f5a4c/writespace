@@ -25,6 +25,7 @@
     "esbuild": "^0.25.12"
   },
   "dependencies": {
+    "@google/genai": "^2.27.0",
     "@resvg/resvg-js": "^2.6.2",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.66.4",
