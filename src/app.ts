@@ -1,12 +1,12 @@
 import express from "express";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
-import { connectRedis } from "./config/redis";
 import { postsRoutes } from "./modules/posts/posts.routes";
 import { authRoutes } from "./modules/auth/auth.routes";
 import { userRoutes } from "./modules/users/user.routes";
 import { interactionsRoutes } from "./modules/interactions/interactions.routes";
 import { notificationRoutes } from "./modules/notification/notification.routes";
+import { aiRoutes } from "./modules/ai/ai.routes";
 import httpLogger from "./shared/middlewares/httpLogger";
 import helmet from "helmet";
 import cors from "cors";
@@ -16,8 +16,6 @@ import { botInterceptor } from "./shared/middlewares/bot-interceptor.middleware"
 import { env } from "./config/env";
 import { configurePassport } from "./modules/auth/auth.utils";
 import passport from "passport";
-import { pool } from "./db";
-import logger from "./config/logger";
 
 dotenv.config();
 
@@ -45,6 +43,7 @@ app.use("/api/v1/posts", postsRoutes);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/interactions", interactionsRoutes);
 app.use("/api/v1/notifications", notificationRoutes);
+app.use("/api/v1/ai", aiRoutes);
 app.use(errorHandler);
 
 app.get("/health", (_req, res) => {
@@ -54,15 +53,5 @@ app.get("/health", (_req, res) => {
     uptime: process.uptime(),
   });
 });
-
-connectRedis();
-
-pool
-  .query("SELECT 1")
-  .then(() => logger.info("PostgreSQL connected successfully"))
-  .catch((err) => {
-    logger.error(`PostgreSQL connection failed: ${err}`);
-    process.exit(1);
-  });
 
 export default app;
