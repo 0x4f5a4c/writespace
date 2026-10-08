@@ -1,10 +1,13 @@
 import { Request, Response, NextFunction } from "express";
-import { interactionsService } from "./interactions.service";
+
 import { ApiResponse } from "@shared/utils/api-response";
 import { HTTP_STATUS } from "@shared/constants/http-codes";
-import { AddCommentDto } from "./dtos/add-comment.dto";
+
 import type { PublicUser } from "../users/interface/user.interface";
-import { AppError } from "@shared/utils/app.error";
+
+import { interactionsService } from "./interactions.service";
+
+import type { ReactionType } from "./contracts/reaction.types";
 
 interface AuthRequest<
   ReqBody = unknown,
@@ -14,21 +17,33 @@ interface AuthRequest<
   user?: PublicUser;
 }
 
+interface AddCommentBody {
+  content: string;
+  parentCommentId?: string | null;
+}
+
+interface ReactionBody {
+  reactionType: ReactionType;
+}
+
 class InteractionsController {
+  // ---------------------------------------------------------------------------
+  // Comments
+  // ---------------------------------------------------------------------------
+
   public addComment = async (
-    req: AuthRequest<AddCommentDto, unknown, { postId: string }>,
+    req: AuthRequest<AddCommentBody, unknown, { postId: string }>,
     res: Response,
     next: NextFunction,
   ) => {
     try {
       const userId = req.user!.id;
-      const postId = req.params.postId;
-      const data = req.body;
+      const { postId } = req.params;
 
       const comment = await interactionsService.createComment(
         userId,
         postId,
-        data,
+        req.body,
       );
 
       new ApiResponse(
@@ -45,23 +60,24 @@ class InteractionsController {
   public getTopLevelComments = async (
     req: AuthRequest<
       unknown,
-      { cursor?: string; limit?: string },
+      {
+        cursor?: string;
+        limit?: string;
+      },
       { postId: string }
     >,
     res: Response,
     next: NextFunction,
   ) => {
     try {
-      const postId = req.params.postId;
+      const { postId } = req.params;
       const limit = parseInt(req.query.limit || "20", 10);
-      const cursor = req.query.cursor;
-      const requesterId = req.user?.id;
 
       const data = await interactionsService.getTopLevelComments(
         postId,
         limit,
-        cursor,
-        requesterId,
+        req.query.cursor,
+        req.user?.id,
       );
 
       new ApiResponse(
@@ -78,23 +94,24 @@ class InteractionsController {
   public getCommentReplies = async (
     req: AuthRequest<
       unknown,
-      { cursor?: string; limit?: string },
+      {
+        cursor?: string;
+        limit?: string;
+      },
       { commentId: string }
     >,
     res: Response,
     next: NextFunction,
   ) => {
     try {
-      const commentId = req.params.commentId;
+      const { commentId } = req.params;
       const limit = parseInt(req.query.limit || "20", 10);
-      const cursor = req.query.cursor;
-      const requesterId = req.user?.id;
 
       const data = await interactionsService.getCommentReplies(
         commentId,
         limit,
-        cursor,
-        requesterId,
+        req.query.cursor,
+        req.user?.id,
       );
 
       new ApiResponse(
@@ -108,67 +125,22 @@ class InteractionsController {
     }
   };
 
-  public likeComment = async (
+  public getCommentById = async (
     req: AuthRequest<unknown, unknown, { commentId: string }>,
     res: Response,
     next: NextFunction,
   ) => {
     try {
-      const userId = req.user!.id;
-      const commentId = req.params.commentId;
-
-      const result = await interactionsService.likeComment(commentId, userId);
-
-      new ApiResponse(
-        res,
-        HTTP_STATUS.OK,
-        result.status === "liked" ? "Comment liked" : "Comment unliked",
-        result,
-      ).send();
-    } catch (error) {
-      next(error);
-    }
-  };
-
-  public likePost = async (
-    req: AuthRequest<unknown, unknown, { postId: string }>,
-    res: Response,
-    next: NextFunction,
-  ) => {
-    try {
-      const userId = req.user!.id;
-      const postId = req.params.postId;
-
-      const result = await interactionsService.toggleLikePost(postId, userId);
+      const comment = await interactionsService.getCommentById(
+        req.params.commentId,
+        req.user?.id,
+      );
 
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
-        result.status === "liked" ? "Post liked" : "Post unliked",
-        result,
-      ).send();
-    } catch (error) {
-      next(error);
-    }
-  };
-
-  public deleteComment = async (
-    req: AuthRequest<unknown, unknown, { commentId: string }>,
-    res: Response,
-    next: NextFunction,
-  ) => {
-    try {
-      const userId = req.user!.id;
-      const commentId = req.params.commentId;
-      const isAdmin = req.user?.role === "admin";
-
-      await interactionsService.deleteComment(userId, commentId, isAdmin);
-
-      new ApiResponse(
-        res,
-        HTTP_STATUS.OK,
-        "Comment deleted successfully",
-        null,
+        "Comment fetched successfully",
+        comment,
       ).send();
     } catch (error) {
       next(error);
@@ -181,28 +153,364 @@ class InteractionsController {
     next: NextFunction,
   ) => {
     try {
-      const userId = req.user!.id;
-      const commentId = req.params.commentId;
-      const { content } = req.body;
-
-      if (!content || content.trim().length === 0) {
-        throw new AppError(
-          HTTP_STATUS.BAD_REQUEST,
-          "Comment content cannot be empty",
-        );
-      }
-
-      const updatedComment = await interactionsService.updateComment(
-        userId,
-        commentId,
-        content,
+      const comment = await interactionsService.updateComment(
+        req.user!.id,
+        req.params.commentId,
+        req.body.content,
       );
 
       new ApiResponse(
         res,
         HTTP_STATUS.OK,
         "Comment updated successfully",
-        updatedComment,
+        comment,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public deleteComment = async (
+    req: AuthRequest<unknown, unknown, { commentId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      await interactionsService.deleteComment(
+        req.user!.id,
+        req.params.commentId,
+        req.user?.role === "admin",
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Comment deleted successfully",
+        null,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Reactions
+  // ---------------------------------------------------------------------------
+
+  public setPostReaction = async (
+    req: AuthRequest<ReactionBody, unknown, { postId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.setPostReaction(
+        req.user!.id,
+        req.params.postId,
+        req.body.reactionType,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Post reaction updated successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public removePostReaction = async (
+    req: AuthRequest<unknown, unknown, { postId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.removePostReaction(
+        req.user!.id,
+        req.params.postId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Post reaction removed successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public setCommentReaction = async (
+    req: AuthRequest<ReactionBody, unknown, { commentId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.setCommentReaction(
+        req.user!.id,
+        req.params.commentId,
+        req.body.reactionType,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Comment reaction updated successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public removeCommentReaction = async (
+    req: AuthRequest<unknown, unknown, { commentId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.removeCommentReaction(
+        req.user!.id,
+        req.params.commentId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Comment reaction removed successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Follow
+  // ---------------------------------------------------------------------------
+
+  public followUser = async (
+    req: AuthRequest<unknown, unknown, { userId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.followUser(
+        req.user!.id,
+        req.params.userId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "User followed successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public unfollowUser = async (
+    req: AuthRequest<unknown, unknown, { userId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.unfollowUser(
+        req.user!.id,
+        req.params.userId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "User unfollowed successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public checkFollowing = async (
+    req: AuthRequest<unknown, unknown, { userId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const isFollowing = await interactionsService.isFollowing(
+        req.user!.id,
+        req.params.userId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Follow status fetched successfully",
+        { isFollowing },
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Saves
+  // ---------------------------------------------------------------------------
+
+  public savePost = async (
+    req: AuthRequest<unknown, unknown, { postId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.savePost(
+        req.user!.id,
+        req.params.postId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Post saved successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public unsavePost = async (
+    req: AuthRequest<unknown, unknown, { postId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const result = await interactionsService.unsavePost(
+        req.user!.id,
+        req.params.postId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Post unsaved successfully",
+        result,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public getSavedPosts = async (
+    req: AuthRequest<
+      unknown,
+      {
+        cursor?: string;
+        limit?: string;
+      }
+    >,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const limit = parseInt(req.query.limit || "20", 10);
+
+      const data = await interactionsService.getSavedPosts({
+        userId: req.user!.id,
+        limit,
+        cursor: req.query.cursor,
+      });
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Saved posts fetched successfully",
+        data,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Shares
+  // ---------------------------------------------------------------------------
+
+  public createShare = async (
+    req: AuthRequest<{ platform: string }, unknown, { postId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const share = await interactionsService.createShare({
+        actorId: req.user!.id,
+        postId: req.params.postId,
+        platform: req.body.platform,
+      });
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.CREATED,
+        "Post shared successfully",
+        share,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public getPostShares = async (
+    req: AuthRequest<
+      unknown,
+      {
+        cursor?: string;
+        limit?: string;
+      },
+      { postId: string }
+    >,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const limit = parseInt(req.query.limit || "20", 10);
+
+      const shares = await interactionsService.getPostShares(
+        req.params.postId,
+        limit,
+        req.query.cursor,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Post shares fetched successfully",
+        shares,
+      ).send();
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public getUserPostShares = async (
+    req: AuthRequest<unknown, unknown, { postId: string }>,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const shares = await interactionsService.getUserPostShares(
+        req.user!.id,
+        req.params.postId,
+      );
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "User post shares fetched successfully",
+        shares,
       ).send();
     } catch (error) {
       next(error);
