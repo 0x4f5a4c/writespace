@@ -1,476 +1,223 @@
-import { eq, and, desc, sql, isNull, lt } from "drizzle-orm";
-import { db } from "../../db";
-import { comments, shares, posts, users, likes } from "../../db/schema";
-import { commentLikes } from "../../db/schema/comment-likes";
-import { AddCommentDto } from "./dtos/add-comment.dto";
-import { AppError } from "@shared/utils/app.error";
-import { HTTP_STATUS } from "@shared/constants/http-codes";
-import { addInteractionJob } from "@shared/queues/interaction.queue";
-import { NotificationType } from "@modules/notification/interface/notification.interface";
-import { notificationService } from "../notification/notification.service";
-import logger from "@config/logger";
+import { commentService } from "./services/comment.service";
+import { reactionService } from "./services/reaction.service";
+import { followService } from "./services/follow.service";
+import { saveService } from "./services/save.service";
+import { shareService } from "./services/share.service";
+
+import type { ReactionType, ReactionResult } from "./contracts/reaction.types";
+
+import type { FollowResult } from "./contracts/follow.types";
+
+import type { SavedPostResult, SavedPostQuery } from "./contracts/save.types";
+
+import type { CreateShareInput, ShareResult } from "./contracts/share.types";
+
+interface CreateCommentInput {
+  content: string;
+  parentCommentId?: string | null;
+}
 
 class InteractionsService {
-  public async createComment(
+  // ---------------------------------------------------------------------------
+  // Comments
+  // ---------------------------------------------------------------------------
+
+  async createComment(
     userId: string,
     postId: string,
-    data: AddCommentDto,
+    input: CreateCommentInput,
   ) {
-    const [post] = await db
-      .select({ id: posts.id, authorId: posts.authorId })
-      .from(posts)
-      .where(eq(posts.id, postId))
-      .limit(1);
-
-    if (!post) {
-      throw new AppError(HTTP_STATUS.NOT_FOUND, "Post not found");
-    }
-
-    let newCommentId: string;
-    let parentCommentAuthor: string | null = null;
-
-    await db.transaction(async (tx) => {
-      const [created] = await tx
-        .insert(comments)
-        .values({
-          content: data.content,
-          postId,
-          authorId: userId,
-          parentCommentId: data.parentCommentId || null,
-        })
-        .returning({ id: comments.id });
-
-      newCommentId = created.id;
-
-      await tx
-        .update(posts)
-        .set({ commentCount: sql`${posts.commentCount} + 1` })
-        .where(eq(posts.id, postId));
-
-      if (data.parentCommentId) {
-        const [parentComment] = await tx
-          .update(comments)
-          .set({ replyCount: sql`${comments.replyCount} + 1` })
-          .where(eq(comments.id, data.parentCommentId))
-          .returning({ authorId: comments.authorId });
-
-        if (parentComment && parentComment.authorId !== userId) {
-          parentCommentAuthor = parentComment.authorId;
-        }
-      }
-    });
-
-    if (parentCommentAuthor) {
-      addInteractionJob({
-        type: NotificationType.COMMENT,
-        recipientId: parentCommentAuthor,
-        actorId: userId,
-        relatedId: postId,
-        message: "replied to your comment",
-      }).catch((err: unknown) =>
-        logger.error("Failed to queue reply notification", {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
-    } else if (post.authorId !== userId) {
-      addInteractionJob({
-        type: NotificationType.COMMENT,
-        recipientId: post.authorId,
-        actorId: userId,
-        relatedId: postId,
-        message: "commented on your post",
-      }).catch((err: unknown) =>
-        logger.error("Failed to queue comment notification", {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
-    }
-
-    return await this.getCommentById(newCommentId!, userId);
+    return commentService.createComment(
+      userId,
+      postId,
+      input.content,
+      input.parentCommentId,
+    );
   }
 
-  public async getTopLevelComments(
+  async getTopLevelComments(
     postId: string,
     limit: number = 20,
     cursor?: string,
     requesterId?: string,
   ) {
-    const conditions = [
-      eq(comments.postId, postId),
-      isNull(comments.parentCommentId),
-    ];
-
-    if (cursor) {
-      conditions.push(lt(comments.createdAt, new Date(cursor)));
-    }
-
-    const results = await db
-      .select({
-        id: comments.id,
-        content: comments.content,
-        parentCommentId: comments.parentCommentId,
-        likeCount: comments.likeCount,
-        replyCount: comments.replyCount,
-        isEdited: comments.isEdited,
-        createdAt: comments.createdAt,
-        updatedAt: comments.updatedAt,
-        author: {
-          id: users.id,
-          username: users.username,
-          fullname: users.fullname,
-          profileImageUrl: users.profileImageUrl,
-        },
-        ...(requesterId
-          ? {
-              isLikedByMe:
-                sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(
-                  Boolean,
-                ),
-            }
-          : {}),
-      })
-      .from(comments)
-      .innerJoin(users, eq(comments.authorId, users.id))
-      .where(and(...conditions))
-      .orderBy(desc(comments.createdAt))
-      .limit(limit);
-
-    let nextCursor: string | null = null;
-    if (results.length === limit) {
-      const lastComment = results[results.length - 1];
-      if (lastComment.createdAt) {
-        nextCursor = lastComment.createdAt.toISOString();
-      }
-    }
-
-    const formattedComments = results.map((row) => ({
-      ...row,
-      isLikedByMe: "isLikedByMe" in row ? !!row.isLikedByMe : false,
-    }));
-
-    return { comments: formattedComments, nextCursor };
+    return commentService.getTopLevelComments(
+      postId,
+      limit,
+      cursor,
+      requesterId,
+    );
   }
 
-  public async getCommentReplies(
+  async getCommentReplies(
     parentCommentId: string,
     limit: number = 20,
     cursor?: string,
     requesterId?: string,
   ) {
-    const conditions = [eq(comments.parentCommentId, parentCommentId)];
-
-    if (cursor) {
-      conditions.push(lt(comments.createdAt, new Date(cursor)));
-    }
-
-    const results = await db
-      .select({
-        id: comments.id,
-        content: comments.content,
-        parentCommentId: comments.parentCommentId,
-        likeCount: comments.likeCount,
-        replyCount: comments.replyCount,
-        isEdited: comments.isEdited,
-        createdAt: comments.createdAt,
-        updatedAt: comments.updatedAt,
-        author: {
-          id: users.id,
-          username: users.username,
-          fullname: users.fullname,
-          profileImageUrl: users.profileImageUrl,
-        },
-        ...(requesterId
-          ? {
-              isLikedByMe:
-                sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(
-                  Boolean,
-                ),
-            }
-          : {}),
-      })
-      .from(comments)
-      .innerJoin(users, eq(comments.authorId, users.id))
-      .where(and(...conditions))
-      .orderBy(desc(comments.createdAt))
-      .limit(limit);
-
-    let nextCursor: string | null = null;
-    if (results.length === limit) {
-      const lastComment = results[results.length - 1];
-      if (lastComment.createdAt) {
-        nextCursor = lastComment.createdAt.toISOString();
-      }
-    }
-
-    const formattedComments = results.map((row) => ({
-      ...row,
-      isLikedByMe: "isLikedByMe" in row ? !!row.isLikedByMe : false,
-    }));
-
-    return { replies: formattedComments, nextCursor };
+    return commentService.getCommentReplies(
+      parentCommentId,
+      limit,
+      cursor,
+      requesterId,
+    );
   }
 
-  private async getCommentById(commentId: string, requesterId?: string) {
-    const [comment] = await db
-      .select({
-        id: comments.id,
-        content: comments.content,
-        parentCommentId: comments.parentCommentId,
-        likeCount: comments.likeCount,
-        replyCount: comments.replyCount,
-        isEdited: comments.isEdited,
-        createdAt: comments.createdAt,
-        updatedAt: comments.updatedAt,
-        author: {
-          id: users.id,
-          username: users.username,
-          fullname: users.fullname,
-          profileImageUrl: users.profileImageUrl,
-        },
-        ...(requesterId
-          ? {
-              isLikedByMe:
-                sql<boolean>`exists(select 1 from ${commentLikes} where ${commentLikes.commentId} = ${comments.id} and ${commentLikes.userId} = ${requesterId})`.mapWith(
-                  Boolean,
-                ),
-            }
-          : {}),
-      })
-      .from(comments)
-      .innerJoin(users, eq(comments.authorId, users.id))
-      .where(eq(comments.id, commentId))
-      .limit(1);
-
-    return {
-      ...comment,
-      isLikedByMe: "isLikedByMe" in comment ? !!comment.isLikedByMe : false,
-    };
+  async getCommentById(commentId: string, requesterId?: string) {
+    return commentService.getCommentById(commentId, requesterId);
   }
 
-  public async likeComment(
-    commentId: string,
-    userId: string,
-  ): Promise<{ status: "liked" | "unliked" }> {
-    let resultStatus: "liked" | "unliked";
-    let commentAuthorId: string | null = null;
-    let relatedPostId: string | null = null;
-
-    await db.transaction(async (tx) => {
-      const [comment] = await tx
-        .select({ authorId: comments.authorId, postId: comments.postId })
-        .from(comments)
-        .where(eq(comments.id, commentId))
-        .limit(1);
-
-      if (comment) {
-        commentAuthorId = comment.authorId;
-        relatedPostId = comment.postId;
-      }
-
-      const [existingLike] = await tx
-        .select()
-        .from(commentLikes)
-        .where(
-          and(
-            eq(commentLikes.commentId, commentId),
-            eq(commentLikes.userId, userId),
-          ),
-        )
-        .limit(1);
-
-      if (existingLike) {
-        await tx
-          .delete(commentLikes)
-          .where(
-            and(
-              eq(commentLikes.commentId, commentId),
-              eq(commentLikes.userId, userId),
-            ),
-          );
-        await tx
-          .update(comments)
-          .set({ likeCount: sql`${comments.likeCount} - 1` })
-          .where(eq(comments.id, commentId));
-        resultStatus = "unliked";
-      } else {
-        await tx.insert(commentLikes).values({ commentId, userId });
-        await tx
-          .update(comments)
-          .set({ likeCount: sql`${comments.likeCount} + 1` })
-          .where(eq(comments.id, commentId));
-        resultStatus = "liked";
-      }
-    });
-
-    if (
-      resultStatus! === "liked" &&
-      commentAuthorId &&
-      commentAuthorId !== userId &&
-      relatedPostId
-    ) {
-      addInteractionJob({
-        type: NotificationType.LIKE,
-        recipientId: commentAuthorId,
-        actorId: userId,
-        relatedId: relatedPostId,
-        message: "liked your comment.",
-      }).catch((err: unknown) =>
-        logger.error("Failed to queue comment like notification", {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
-    }
-
-    return { status: resultStatus! };
+  async updateComment(userId: string, commentId: string, content: string) {
+    return commentService.updateComment(userId, commentId, content);
   }
 
-  public async toggleLikePost(
-    postId: string,
-    userId: string,
-  ): Promise<{ status: "liked" | "unliked" }> {
-    let resultStatus: "liked" | "unliked";
-    let postAuthorId: string | null = null;
-
-    await db.transaction(async (tx) => {
-      const [post] = await tx
-        .select({ authorId: posts.authorId })
-        .from(posts)
-        .where(eq(posts.id, postId))
-        .limit(1);
-
-      if (!post) {
-        throw new AppError(HTTP_STATUS.NOT_FOUND, "Post not found");
-      }
-
-      postAuthorId = post.authorId;
-
-      const [existingLike] = await tx
-        .select()
-        .from(likes)
-        .where(and(eq(likes.postId, postId), eq(likes.userId, userId)))
-        .limit(1);
-
-      if (existingLike) {
-        await tx
-          .delete(likes)
-          .where(and(eq(likes.postId, postId), eq(likes.userId, userId)));
-        await tx
-          .update(posts)
-          .set({ likeCount: sql`${posts.likeCount} - 1` })
-          .where(eq(posts.id, postId));
-        resultStatus = "unliked";
-      } else {
-        await tx.insert(likes).values({ postId, userId });
-        await tx
-          .update(posts)
-          .set({ likeCount: sql`${posts.likeCount} + 1` })
-          .where(eq(posts.id, postId));
-        resultStatus = "liked";
-      }
-    });
-
-    // Notify the author if it's a new like
-    if (resultStatus! === "liked" && postAuthorId && postAuthorId !== userId) {
-      notificationService
-        .sendLikeNotification(postAuthorId, userId, postId)
-        .catch((err: unknown) =>
-          logger.error("Failed to queue post like notification", {
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
-    }
-
-    return { status: resultStatus! };
-  }
-
-  public async deleteComment(
+  async deleteComment(
     userId: string,
     commentId: string,
     isAdmin: boolean = false,
   ): Promise<void> {
-    const [comment] = await db
-      .select()
-      .from(comments)
-      .where(eq(comments.id, commentId))
-      .limit(1);
+    return commentService.deleteComment(userId, commentId, isAdmin);
+  }
 
-    if (!comment) {
-      throw new AppError(HTTP_STATUS.NOT_FOUND, "Comment not found");
-    }
+  // ---------------------------------------------------------------------------
+  // Reactions
+  // ---------------------------------------------------------------------------
 
-    if (comment.authorId !== userId && !isAdmin) {
-      throw new AppError(
-        HTTP_STATUS.FORBIDDEN,
-        "Not authorized to delete this comment",
-      );
-    }
-
-    await db.transaction(async (tx) => {
-      await tx.delete(comments).where(eq(comments.id, commentId));
-      await tx.execute(
-        sql`UPDATE posts SET comment_count = (SELECT COUNT(*) FROM comments WHERE post_id = ${comment.postId}) WHERE id = ${comment.postId}`,
-      );
-
-      if (comment.parentCommentId) {
-        await tx.execute(
-          sql`UPDATE comments SET reply_count = (SELECT COUNT(*) FROM comments WHERE parent_comment_id = ${comment.parentCommentId}) WHERE id = ${comment.parentCommentId}`,
-        );
-      }
+  async setReaction(
+    actorId: string,
+    targetId: string,
+    targetType: "POST" | "COMMENT",
+    reactionType: ReactionType,
+  ): Promise<ReactionResult> {
+    return reactionService.setReaction({
+      actorId,
+      targetId,
+      targetType,
+      reactionType,
     });
   }
 
-  public async updateComment(
-    userId: string,
-    commentId: string,
-    content: string,
-  ) {
-    const [comment] = await db
-      .select()
-      .from(comments)
-      .where(eq(comments.id, commentId))
-      .limit(1);
-
-    if (!comment) {
-      throw new AppError(HTTP_STATUS.NOT_FOUND, "Comment not found");
-    }
-
-    if (comment.authorId !== userId) {
-      throw new AppError(
-        HTTP_STATUS.FORBIDDEN,
-        "You are not authorized to edit this comment",
-      );
-    }
-
-    await db
-      .update(comments)
-      .set({ content, isEdited: true })
-      .where(eq(comments.id, commentId));
-
-    return await this.getCommentById(commentId, userId);
+  async removeReaction(
+    actorId: string,
+    targetId: string,
+    targetType: "POST" | "COMMENT",
+  ): Promise<ReactionResult> {
+    return reactionService.removeReaction({
+      actorId,
+      targetId,
+      targetType,
+    });
   }
 
-  public async logShare(
+  async setPostReaction(
+    actorId: string,
+    postId: string,
+    reactionType: ReactionType,
+  ): Promise<ReactionResult> {
+    return this.setReaction(actorId, postId, "POST", reactionType);
+  }
+
+  async removePostReaction(
+    actorId: string,
+    postId: string,
+  ): Promise<ReactionResult> {
+    return this.removeReaction(actorId, postId, "POST");
+  }
+
+  async setCommentReaction(
+    actorId: string,
+    commentId: string,
+    reactionType: ReactionType,
+  ): Promise<ReactionResult> {
+    return this.setReaction(actorId, commentId, "COMMENT", reactionType);
+  }
+
+  async removeCommentReaction(
+    actorId: string,
+    commentId: string,
+  ): Promise<ReactionResult> {
+    return this.removeReaction(actorId, commentId, "COMMENT");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Follow
+  // ---------------------------------------------------------------------------
+
+  async followUser(
+    actorId: string,
+    targetUserId: string,
+  ): Promise<FollowResult> {
+    return followService.followUser({
+      actorId,
+      targetUserId,
+    });
+  }
+
+  async unfollowUser(
+    actorId: string,
+    targetUserId: string,
+  ): Promise<FollowResult> {
+    return followService.unfollowUser({
+      actorId,
+      targetUserId,
+    });
+  }
+
+  async isFollowing(followerId: string, followingId: string): Promise<boolean> {
+    return followService.isFollowing(followerId, followingId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Saves
+  // ---------------------------------------------------------------------------
+
+  async savePost(actorId: string, postId: string): Promise<SavedPostResult> {
+    return saveService.savePost({
+      actorId,
+      postId,
+    });
+  }
+
+  async unsavePost(actorId: string, postId: string): Promise<SavedPostResult> {
+    return saveService.unsavePost({
+      actorId,
+      postId,
+    });
+  }
+
+  async isPostSaved(userId: string, postId: string): Promise<boolean> {
+    return saveService.isPostSaved(userId, postId);
+  }
+
+  async getSavedPosts(input: SavedPostQuery) {
+    return saveService.getSavedPosts(input);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shares
+  // ---------------------------------------------------------------------------
+
+  async createShare(input: CreateShareInput): Promise<ShareResult> {
+    return shareService.createShare(input);
+  }
+
+  async getShareById(id: number): Promise<ShareResult | null> {
+    return shareService.getShareById(id);
+  }
+
+  async getPostShares(
+    postId: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<ShareResult[]> {
+    return shareService.getPostShares(postId, limit, cursor);
+  }
+
+  async getUserPostShares(
     userId: string,
     postId: string,
-    platform: string,
-  ): Promise<void> {
-    await db.insert(shares).values({ userId, postId, platform });
-
-    const [post] = await db
-      .select({ authorId: posts.authorId })
-      .from(posts)
-      .where(eq(posts.id, postId))
-      .limit(1);
-
-    if (post && post.authorId !== userId) {
-      notificationService
-        .sendShareNotification(post.authorId, userId, postId)
-        .catch((err: unknown) =>
-          logger.error("Failed to queue share notification", {
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
-    }
+  ): Promise<ShareResult[]> {
+    return shareService.getUserPostShares(userId, postId);
   }
 }
 
