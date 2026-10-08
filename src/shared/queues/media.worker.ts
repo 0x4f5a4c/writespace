@@ -25,9 +25,10 @@ export const mediaWorker = new Worker(
       return;
     }
 
+    const failedPublicIds: string[] = [];
+
     for (const publicId of publicIds) {
       if (!publicId || publicId.startsWith("http")) {
-        // Guard: refuse to process raw URLs — they were never valid inputs.
         logger.warn(
           `Media cleanup skipped invalid public_id (looks like a URL): ${publicId}`,
         );
@@ -36,13 +37,27 @@ export const mediaWorker = new Worker(
 
       try {
         await cloudinary.uploader.destroy(publicId);
+
         logger.info(`Cloudinary destroy succeeded for public_id: ${publicId}`);
       } catch (error: unknown) {
         const err = error instanceof Error ? error : new Error(String(error));
-        logger.error(`Failed to delete Cloudinary asset ${publicId}:`, err);
-        // Rethrow so BullMQ retries the whole job per the queue's backoff config.
-        throw err;
+
+        failedPublicIds.push(publicId);
+
+        logger.error(`Failed to delete Cloudinary asset ${publicId}`, err);
+
+        // Do not throw here.
+        // Continue processing the remaining publicIds so one
+        // failed deletion does not block the entire batch.
       }
+    }
+
+    if (failedPublicIds.length > 0) {
+      throw new Error(
+        `Failed to delete ${failedPublicIds.length} Cloudinary asset(s): ${failedPublicIds.join(
+          ", ",
+        )}`,
+      );
     }
   },
   {
@@ -53,4 +68,8 @@ export const mediaWorker = new Worker(
 
 mediaWorker.on("failed", (job: Job | undefined, err: Error) => {
   logger.error(`Media cleanup job ${job?.id} failed:`, err);
+});
+
+mediaWorker.on("error", (error) => {
+  logger.error("Media worker error", { error });
 });
