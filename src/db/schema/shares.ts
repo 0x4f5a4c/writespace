@@ -30,6 +30,8 @@ export const shares = pgTable(
       table.postId,
       table.platform,
     ),
+
+    index("shares_post_created_idx").on(table.postId, table.createdAt),
   ],
 );
 
