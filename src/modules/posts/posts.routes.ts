@@ -22,7 +22,7 @@ router.get(
 );
 
 router.post(
-  "/",
+  "/create",
   authenticate as RequestHandler,
   upload.fields([
     { name: "banner", maxCount: 1 },
@@ -57,6 +57,10 @@ router.post(
   postsController.likePost as RequestHandler,
 );
 
-router.post("/:id/share", postsController.sharePost as RequestHandler);
+router.post(
+  "/:id/share",
+  authenticate as RequestHandler,
+  postsController.sharePost as RequestHandler,
+);
 
 export const postsRoutes = router;
