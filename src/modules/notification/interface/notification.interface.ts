@@ -1,5 +1,5 @@
 export enum NotificationType {
-  LIKE = "LIKE",
+  REACTION = "REACTION",
   COMMENT = "COMMENT",
   FOLLOW = "FOLLOW",
   SHARE = "SHARE",

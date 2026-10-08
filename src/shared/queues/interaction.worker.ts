@@ -37,7 +37,7 @@ export const interactionWorker = new Worker<IInteractionJob>(
   },
   {
     connection: bullmqRedisConnection,
-    concurrency: env.MEDIA_WORKER_CONCURRENCY,
+    concurrency: env.INTERACTION_WORKER_CONCURRENCY,
   },
 );
 
@@ -47,3 +47,7 @@ interactionWorker.on(
     logger.error(`Interaction job ${job?.id} failed: ${err.message}`);
   },
 );
+
+interactionWorker.on("error", (error) => {
+  logger.error("Interaction worker error", { error });
+});

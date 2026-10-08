@@ -4,6 +4,11 @@ import { CreatePostInput } from "./dtos/create-post.dto";
 import { ApiResponse } from "@shared/utils/api-response";
 import { HTTP_STATUS } from "@shared/constants/http-codes";
 import type { CodeSnippetSchema } from "../../db/schema/posts";
+import type {
+  PostMediaItem,
+  PostCoverImage,
+} from "./interfaces/post.interface";
+import { postMediaService } from "./services/post-media.service";
 import type { PublicUser } from "@modules/users/interface/user.interface";
 import type { CloudinaryFilesMap } from "@shared/types/cloudinary-file";
 
@@ -16,61 +21,88 @@ interface AuthRequest<
 }
 
 type CreatePayloadWithExtras = CreatePostInput & {
-  media: string[];
-  mediaPublicIds?: string[];
+  media: PostMediaItem[];
   codeSnippets: CodeSnippetSchema[];
-  coverImage?: {
-    url: string;
-    publicId: string;
-    altText?: string;
-    credit?: string;
-  };
+  coverImage?: PostCoverImage;
 };
 
 type UpdatePayloadWithExtras = Partial<CreatePostInput> & {
-  media?: string[];
-  mediaPublicIds?: string[];
+  media?: PostMediaItem[];
   codeSnippets?: CodeSnippetSchema[];
-  coverImage?: {
-    url: string;
-    publicId: string;
-    altText?: string;
-    credit?: string;
-  };
+  coverImage?: PostCoverImage;
 };
 
 class PostsController {
   public createPost = async (
     req: AuthRequest<
-      CreatePostInput & { media?: string[]; codeSnippets?: unknown }
+      CreatePostInput & {
+        codeSnippets?: unknown;
+      }
     >,
     res: Response,
     next: NextFunction,
   ) => {
     try {
       const authorId = req.user!.id;
-      // Typecasting safely
+
       const payload = req.body as CreatePayloadWithExtras;
 
       const files = req.files as CloudinaryFilesMap | undefined;
 
+      /*
+       * ---------------------------------------------------------
+       * Cover Image
+       * ---------------------------------------------------------
+       *
+       * Cloudinary uploads the banner and gives us:
+       *
+       *   location  -> image URL
+       *   public_id -> Cloudinary public ID
+       *
+       * The Post module uses the canonical PostCoverImage
+       * representation.
+       */
       const bannerFile = files?.["banner"]?.[0];
+
       if (bannerFile) {
-        payload.coverImage = {
-          url: bannerFile.location,
-          publicId: bannerFile.public_id,
-          altText: payload.coverImage?.altText,
-          credit: payload.coverImage?.credit,
-        };
+        payload.coverImage = postMediaService.createCoverImage(
+          bannerFile.location,
+          bannerFile.public_id,
+          payload.coverImage?.altText,
+          payload.coverImage?.credit,
+        );
       }
 
+      /*
+       * ---------------------------------------------------------
+       * Post Media
+       * ---------------------------------------------------------
+       *
+       * Convert uploaded Cloudinary files into the canonical
+       * PostMediaItem[] representation:
+       *
+       *   {
+       *     url,
+       *     publicId
+       *   }
+       */
       const mediaFiles = files?.["media"] ?? [];
-      if (mediaFiles.length > 0) {
-        payload.media = mediaFiles.map((f) => f.location);
-        payload.mediaPublicIds = mediaFiles.map((f) => f.public_id);
-      }
 
+      payload.media = mediaFiles.map((file) =>
+        postMediaService.createMediaItem(file.location, file.public_id),
+      );
+
+      /*
+       * ---------------------------------------------------------
+       * Code Snippets
+       * ---------------------------------------------------------
+       *
+       * multipart/form-data sends complex fields as strings,
+       * so parse codeSnippets before passing the payload to the
+       * Post service.
+       */
       let parsedCodeSnippets: CodeSnippetSchema[] = [];
+
       if (req.body.codeSnippets) {
         if (typeof req.body.codeSnippets === "string") {
           try {
@@ -79,14 +111,21 @@ class PostsController {
             ) as CodeSnippetSchema[];
           } catch (error: unknown) {
             console.error("Failed to parse code snippets", error);
+
             parsedCodeSnippets = [];
           }
         } else if (Array.isArray(req.body.codeSnippets)) {
           parsedCodeSnippets = req.body.codeSnippets as CodeSnippetSchema[];
         }
       }
+
       payload.codeSnippets = parsedCodeSnippets;
 
+      /*
+       * ---------------------------------------------------------
+       * Create Post
+       * ---------------------------------------------------------
+       */
       const fullyHydratedPost = await postService.createPost(authorId, payload);
 
       new ApiResponse(
@@ -156,7 +195,6 @@ class PostsController {
   public updatePost = async (
     req: AuthRequest<
       Partial<CreatePostInput> & {
-        media?: string[];
         existingMedia?: string | string[];
         existingMediaPublicIds?: string | string[];
         codeSnippets?: unknown;
@@ -168,57 +206,120 @@ class PostsController {
     try {
       const postId = req.params.id;
       const authorId = req.user!.id;
-      // Typecasting safely
+
       const payload = req.body as UpdatePayloadWithExtras;
 
       const files = req.files as CloudinaryFilesMap | undefined;
 
+      /*
+       * ---------------------------------------------------------
+       * Cover Image
+       * ---------------------------------------------------------
+       */
       const bannerFile = files?.["banner"]?.[0];
+
       if (bannerFile) {
-        payload.coverImage = {
-          url: bannerFile.location,
-          publicId: bannerFile.public_id,
-          altText: payload.coverImage?.altText,
-          credit: payload.coverImage?.credit,
-        };
+        payload.coverImage = postMediaService.createCoverImage(
+          bannerFile.location,
+          bannerFile.public_id,
+          payload.coverImage?.altText,
+          payload.coverImage?.credit,
+        );
       }
 
+      /*
+       * ---------------------------------------------------------
+       * Media
+       * ---------------------------------------------------------
+       *
+       * The client sends:
+       *
+       * existingMedia
+       * existingMediaPublicIds
+       *
+       * New uploads come from Cloudinary files.
+       *
+       * We convert everything into the canonical:
+       *
+       * PostMediaItem[]
+       *
+       * representation before passing it to the service.
+       */
+
       const mediaFiles = files?.["media"] ?? [];
-      const newMediaUrls = mediaFiles.map((f) => f.location);
-      const newMediaPublicIds = mediaFiles.map((f) => f.public_id);
+
+      const newMedia: PostMediaItem[] = mediaFiles.map((file) =>
+        postMediaService.createMediaItem(file.location, file.public_id),
+      );
 
       let existingMedia: string[] = [];
       let existingMediaPublicIds: string[] = [];
 
-      if (req.body.existingMedia) {
-        existingMedia = Array.isArray(req.body.existingMedia)
-          ? (req.body.existingMedia as string[])
-          : [req.body.existingMedia as string];
+      const hasExistingMediaField = Object.prototype.hasOwnProperty.call(
+        req.body,
+        "existingMedia",
+      );
+
+      const hasExistingMediaPublicIdsField =
+        Object.prototype.hasOwnProperty.call(
+          req.body,
+          "existingMediaPublicIds",
+        );
+
+      if (hasExistingMediaField) {
+        const value = req.body.existingMedia;
+
+        existingMedia = Array.isArray(value)
+          ? (value as string[])
+          : [value as string];
       }
 
-      if (req.body.existingMediaPublicIds) {
-        existingMediaPublicIds = Array.isArray(req.body.existingMediaPublicIds)
-          ? (req.body.existingMediaPublicIds as string[])
-          : [req.body.existingMediaPublicIds as string];
+      if (hasExistingMediaPublicIdsField) {
+        const value = req.body.existingMediaPublicIds;
+
+        existingMediaPublicIds = Array.isArray(value)
+          ? (value as string[])
+          : [value as string];
       }
 
-      if (newMediaUrls.length > 0 || existingMedia.length > 0) {
-        payload.media = [...existingMedia, ...newMediaUrls];
-        payload.mediaPublicIds = [
-          ...existingMediaPublicIds,
-          ...newMediaPublicIds,
-        ];
+      /*
+       * If the client sent any media information, construct the
+       * complete next media state.
+       *
+       * This also allows the client to explicitly send empty
+       * arrays to remove all existing media.
+       */
+      if (
+        hasExistingMediaField ||
+        hasExistingMediaPublicIdsField ||
+        newMedia.length > 0
+      ) {
+        if (existingMedia.length !== existingMediaPublicIds.length) {
+          throw new Error(
+            "Existing media URLs and publicIds must contain the same number of items",
+          );
+        }
+
+        const existingMediaItems: PostMediaItem[] = existingMedia.map(
+          (url, index) =>
+            postMediaService.createMediaItem(
+              url,
+              existingMediaPublicIds[index],
+            ),
+        );
+
+        payload.media = [...existingMediaItems, ...newMedia];
+
+        postMediaService.validateMedia(payload.media);
       }
 
-      const rawIsPublished = (req.body as Record<string, unknown>)
-        .isPublished as unknown;
-      if (rawIsPublished === "true" || rawIsPublished === true) {
-        payload.isPublished = true;
-      } else if (rawIsPublished === "false" || rawIsPublished === false) {
-        payload.isPublished = false;
-      }
-
+      /*
+       * ---------------------------------------------------------
+       * Code Snippets
+       * ---------------------------------------------------------
+       */
       let parsedCodeSnippets: CodeSnippetSchema[] | undefined = undefined;
+
       if (req.body.codeSnippets) {
         if (typeof req.body.codeSnippets === "string") {
           try {
@@ -232,10 +333,16 @@ class PostsController {
           parsedCodeSnippets = req.body.codeSnippets as CodeSnippetSchema[];
         }
       }
+
       if (parsedCodeSnippets !== undefined) {
         payload.codeSnippets = parsedCodeSnippets;
       }
 
+      /*
+       * ---------------------------------------------------------
+       * Update Post
+       * ---------------------------------------------------------
+       */
       const updatedPost = await postService.updatePost(
         postId,
         authorId,

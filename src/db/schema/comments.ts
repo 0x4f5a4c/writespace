@@ -8,6 +8,7 @@ import {
   varchar,
   AnyPgColumn,
 } from "drizzle-orm/pg-core";
+
 import { users } from "./users";
 import { posts } from "./posts";
 
@@ -15,35 +16,57 @@ export const comments = pgTable(
   "comments",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    content: varchar("content", { length: 1000 }).notNull(),
+
+    content: varchar("content", { length: 2500 }).notNull(),
+
     postId: uuid("post_id")
       .notNull()
-      .references(() => posts.id, { onDelete: "cascade" }),
+      .references(() => posts.id, {
+        onDelete: "cascade",
+      }),
+
     authorId: uuid("author_id")
       .notNull()
-      .references(() => users.id, { onDelete: "restrict" }),
+      .references(() => users.id, {
+        onDelete: "restrict",
+      }),
+
     parentCommentId: uuid("parent_comment_id").references(
       (): AnyPgColumn => comments.id,
-      { onDelete: "cascade" },
+      {
+        onDelete: "cascade",
+      },
     ),
     likeCount: integer("like_count").default(0).notNull(),
     replyCount: integer("reply_count").default(0).notNull(),
     isEdited: boolean("is_edited").default(false).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true })
+
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
+
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+    })
       .defaultNow()
       .notNull()
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    index("comments_post_parent_created_idx").on(
+    index("comments_post_parent_created_id_idx").on(
       table.postId,
       table.parentCommentId,
       table.createdAt,
+      table.id,
     ),
-    index("comments_parent_idx").on(table.parentCommentId),
+
+    index("comments_parent_created_id_idx").on(
+      table.parentCommentId,
+      table.createdAt,
+      table.id,
+    ),
   ],
 );
 

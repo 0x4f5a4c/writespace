@@ -1,16 +1,17 @@
 import { Request, Response, NextFunction } from "express";
-
 import { AnyZodObject } from "zod";
 
 export const validate =
   (schema: AnyZodObject) =>
   (req: Request, _res: Response, next: NextFunction): void => {
     try {
-      schema.parse({
+      const parsed = schema.parse({
         body: req.body as unknown,
-        query: req.query as unknown,
-        params: req.params as unknown,
+        query: req.query,
+        params: req.params,
       });
+
+      req.body = parsed.body as unknown;
 
       next();
     } catch (error) {

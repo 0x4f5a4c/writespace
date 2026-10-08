@@ -42,3 +42,7 @@ emailWorker.on("completed", (job) => {
 emailWorker.on("failed", (job, err) => {
   logger.error(`Email job ${job?.id} failed with error: ${err.message}`);
 });
+
+emailWorker.on("error", (error) => {
+  logger.error("Email worker error", { error });
+});

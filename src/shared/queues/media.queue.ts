@@ -1,4 +1,5 @@
 import { Queue } from "bullmq";
+import env from "@config/env";
 import { bullmqRedisConnection } from "@config/bullmq";
 
 // Parse the REDIS_URL from env.ts to extract host and port for BullMQ
@@ -24,8 +25,8 @@ export const addMediaCleanupJob = async (
     { publicIds: filtered },
     {
       removeOnComplete: true,
-      attempts: 3,
-      backoff: { type: "exponential", delay: 1000 },
+      attempts: env.MEDIA_QUEUE_ATTEMPTS,
+      backoff: { type: "exponential", delay: env.QUEUE_BACKOFF_DELAY_MS },
     },
   );
 };

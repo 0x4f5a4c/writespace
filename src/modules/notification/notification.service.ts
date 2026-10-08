@@ -149,7 +149,7 @@ class NotificationService implements INotificationService {
     if (recipientId === actorId) return;
     await this.createInAppNotification(
       recipientId,
-      NotificationType.LIKE,
+      NotificationType.REACTION,
       "liked your post.",
       postId,
       actorId,
