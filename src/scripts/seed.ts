@@ -26,8 +26,6 @@ import {
   users,
   posts,
   comments,
-  likes,
-  commentLikes,
   follows,
   shares,
   type NewUser,
@@ -989,9 +987,9 @@ async function main() {
       likeRows.push({ userId: uid, postId: p.id });
     }
   }
-  for (let i = 0; i < likeRows.length; i += BATCH_SIZE) {
-    await db.insert(likes).values(likeRows.slice(i, i + BATCH_SIZE));
-  }
+  // for (let i = 0; i < likeRows.length; i += BATCH_SIZE) {
+  //   await db.insert(likes).values(likeRows.slice(i, i + BATCH_SIZE));
+  // }
   console.log(`   ✅ Inserted ${likeRows.length} likes\n`);
 
   // 6. Comment likes — small subset
@@ -1011,9 +1009,9 @@ async function main() {
       clikeRows.push({ commentId: cid, userId: uid });
     }
   }
-  for (let i = 0; i < clikeRows.length; i += BATCH_SIZE) {
-    await db.insert(commentLikes).values(clikeRows.slice(i, i + BATCH_SIZE));
-  }
+  // for (let i = 0; i < clikeRows.length; i += BATCH_SIZE) {
+  //   await db.insert(commentLikes).values(clikeRows.slice(i, i + BATCH_SIZE));
+  // }
   console.log(`   ✅ Inserted ${clikeRows.length} comment likes\n`);
 
   // 7. Real follows — small subset (counters already set high)

@@ -1,3 +1,3 @@
-import { Like } from "../../../db/schema";
+// import { Like } from "../../../db/schema";
 
-export type { Like };
+// export type { Like };
