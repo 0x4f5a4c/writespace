@@ -23,12 +23,23 @@ import { postMedia } from "./post-media";
 import { posts } from "./posts";
 import { users } from "./users";
 
+import { authChallenges } from "./auth-challenges";
+import { authIdentities } from "./auth-identities";
+import { authSessions } from "./auth-sessions";
+import { refreshTokens } from "./refresh-tokens";
+import { securityEvents } from "./security-events";
+
 /**
  * Drizzle relations mirror the foreign keys defined in each table.
  * The table schemas define the actual database constraints.
  */
 
 export const usersRelations = relations(users, ({ many, one }) => ({
+  authIdentities: many(authIdentities),
+  authSessions: many(authSessions),
+  authChallenges: many(authChallenges),
+  securityEvents: many(securityEvents),
+
   contentItems: many(contentItems),
   comments: many(comments),
 
@@ -322,3 +333,49 @@ export const interactionEventsRelations = relations(
     }),
   }),
 );
+
+export const authIdentitiesRelations = relations(authIdentities, ({ one }) => ({
+  user: one(users, {
+    fields: [authIdentities.userId],
+    references: [users.id],
+  }),
+}));
+
+export const authSessionsRelations = relations(
+  authSessions,
+  ({ one, many }) => ({
+    user: one(users, {
+      fields: [authSessions.userId],
+      references: [users.id],
+    }),
+
+    refreshTokens: many(refreshTokens),
+    securityEvents: many(securityEvents),
+  }),
+);
+
+export const refreshTokensRelations = relations(refreshTokens, ({ one }) => ({
+  session: one(authSessions, {
+    fields: [refreshTokens.sessionId],
+    references: [authSessions.id],
+  }),
+}));
+
+export const authChallengesRelations = relations(authChallenges, ({ one }) => ({
+  user: one(users, {
+    fields: [authChallenges.userId],
+    references: [users.id],
+  }),
+}));
+
+export const securityEventsRelations = relations(securityEvents, ({ one }) => ({
+  user: one(users, {
+    fields: [securityEvents.userId],
+    references: [users.id],
+  }),
+
+  session: one(authSessions, {
+    fields: [securityEvents.sessionId],
+    references: [authSessions.id],
+  }),
+}));
