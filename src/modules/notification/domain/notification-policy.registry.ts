@@ -1,6 +1,6 @@
 import type { DomainEventName } from "./event-name";
 
-export const NOTIFICATION_POLICY_VERSION = "social-notification-policy-v1";
+export const NOTIFICATION_POLICY_VERSION = "notification-policy-v2";
 
 export type NotificationPolicyCategory =
   | "social"
@@ -20,24 +20,9 @@ export type NotificationClassification =
   | "conditional";
 
 export interface NotificationChannelPolicy {
-  /**
-   * Whether the event catalogue permits this channel for the event.
-   */
   readonly permitted: boolean;
-
-  /**
-   * Whether the channel is implemented and can currently process work.
-   */
   readonly available: boolean;
-
-  /**
-   * Effective default when the user has no preference override.
-   */
   readonly enabledByDefault: boolean;
-
-  /**
-   * Whether the user may change this channel through preferences.
-   */
   readonly preferenceControlled: boolean;
 }
 
@@ -56,7 +41,7 @@ export interface NotificationEventPolicy {
  *
  * In-app notifications are enabled by default.
  * Optional social email is disabled by default.
- * Browser push is planned but not available in the current implementation.
+ * Browser push is not available yet.
  */
 const socialActivityPolicy: NotificationEventPolicy = {
   category: "social",
@@ -88,11 +73,48 @@ const socialActivityPolicy: NotificationEventPolicy = {
 };
 
 /**
+ * Security alerts are mandatory account communications.
+ *
+ * Users cannot disable these alerts through ordinary notification
+ * preferences or category-level preference overrides.
+ *
+ * Both the inbox and transactional email channels are enabled.
+ * Realtime uses the existing authenticated Socket.IO delivery handler.
+ */
+const mandatorySecurityPolicy: NotificationEventPolicy = {
+  category: "security",
+  priority: "high",
+  classification: "mandatory_security",
+
+  channels: {
+    in_app: {
+      permitted: true,
+      available: true,
+      enabledByDefault: true,
+      preferenceControlled: false,
+    },
+
+    email: {
+      permitted: true,
+      available: true,
+      enabledByDefault: true,
+      preferenceControlled: false,
+    },
+
+    browser_push: {
+      permitted: false,
+      available: false,
+      enabledByDefault: false,
+      preferenceControlled: false,
+    },
+  },
+};
+
+/**
  * Version-controlled policy registry.
  *
  * Only events that currently produce user-facing notifications are listed.
- * Other registered domain events can still be valid and intentionally produce
- * no notification.
+ * Other valid domain events may intentionally produce no notification.
  */
 const notificationPolicyRegistry: Partial<
   Record<DomainEventName, NotificationEventPolicy>
@@ -102,23 +124,21 @@ const notificationPolicyRegistry: Partial<
   "comment.created": socialActivityPolicy,
   "comment.replied": socialActivityPolicy,
   "mention.created": socialActivityPolicy,
+
+  "auth.security_alert": mandatorySecurityPolicy,
 };
 
 export function getNotificationPolicy(
   eventName: DomainEventName,
 ): NotificationEventPolicy | null {
-  const policy: NotificationEventPolicy | undefined =
-    notificationPolicyRegistry[eventName];
+  const policy = notificationPolicyRegistry[eventName];
 
-  return policy === undefined ? null : policy;
+  return policy ?? null;
 }
 
 /**
  * Effective in-app preference policy exposed to the preference service
  * and API.
- *
- * Defaults are sourced from the event policy registry. User-specific
- * overrides remain in notification_preferences.
  */
 export interface InAppPreferencePolicy {
   category: NotificationPolicyCategory;
@@ -147,9 +167,6 @@ function isInAppPreferenceEditable(policy: NotificationEventPolicy): boolean {
 
 /**
  * Resolve the in-app preference policy for one domain event.
- *
- * Returns null when in-app delivery is not currently permitted or available.
- * The processor can use this to evaluate a particular event.
  */
 export function getInAppPreferencePolicyForEvent(
   eventName: DomainEventName,
@@ -179,9 +196,7 @@ export function getInAppPreferencePolicyForEvent(
 /**
  * Build the supported in-app preference catalogue.
  *
- * Categories are discovered from registered notification-producing events,
- * rather than maintained as a separate hardcoded frontend list.
- *
+ * Categories are discovered from notification-producing events.
  * Events sharing a category must use the same in-app default because
  * the user controls that category through one preference setting.
  */
