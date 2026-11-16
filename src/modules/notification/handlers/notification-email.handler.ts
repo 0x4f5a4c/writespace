@@ -10,6 +10,7 @@ import type {
 } from "../contracts/delivery-handler.contract";
 
 import { notificationEmailTemplate } from "../templates/notification-email";
+import { securityAlertEmailTemplate } from "../templates/security-alert";
 
 import { mailer } from "@shared/infra/mailer";
 import logger from "@config/logger";
@@ -226,7 +227,12 @@ export class NotificationEmailHandler implements NotificationDeliveryHandler {
       };
     }
 
-    if (recipient.status !== "active") {
+    // Mandatory security alerts must still reach an account owner whose
+    // account was just suspended or banned. Other notification emails remain
+    // suppressed for inactive accounts.
+    const isSecurityAlert = notification.notificationType === "SECURITY_ALERT";
+
+    if (recipient.status !== "active" && !isSecurityAlert) {
       return {
         outcome: "suppressed",
         errorCode: "notification_email_account_inactive",
@@ -244,11 +250,17 @@ export class NotificationEmailHandler implements NotificationDeliveryHandler {
 
     const recipientName = recipient.fullname.trim() || recipient.username;
 
-    const template = notificationEmailTemplate({
-      recipientName,
-      title: notification.title,
-      body: notification.body,
-    });
+    const template = isSecurityAlert
+      ? securityAlertEmailTemplate({
+          recipientName,
+          title: notification.title,
+          body: notification.body,
+        })
+      : notificationEmailTemplate({
+          recipientName,
+          title: notification.title,
+          body: notification.body,
+        });
 
     try {
       const result = await mailer.sendEmail({
