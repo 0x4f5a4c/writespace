@@ -1,6 +1,5 @@
 services:
-    # Writespace API - Production
-  
+  # Writespace API - Production
   api:
     build:
       context: .
@@ -38,7 +37,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "const s=require('node:net').connect(8000,'127.0.0.1');s.on('connect',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));"
+          "fetch('http://127.0.0.1:8000/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
         ]
       interval: 30s
       timeout: 5s
@@ -50,7 +49,6 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-
 
 volumes:
   api_logs:
