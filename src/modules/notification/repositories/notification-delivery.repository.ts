@@ -79,8 +79,9 @@ export class NotificationDeliveryRepository {
   /**
    * Read PostgreSQL's current clock after the delivery row has been locked.
    *
-   * Using the database clock avoids relying on individual worker clocks
-   * when checking ownership and calculating delivery leases.
+   * Raw SQL expressions do not automatically guarantee JavaScript Date
+   * conversion. Normalize the returned database value explicitly so lease
+   * calculations always operate on a valid Date instance.
    */
   private async getDatabaseNow(
     transaction: DatabaseTransaction,
@@ -88,7 +89,7 @@ export class NotificationDeliveryRepository {
   ): Promise<Date> {
     const [result] = await transaction
       .select({
-        now: sql<Date>`clock_timestamp()`,
+        now: sql<unknown>`clock_timestamp()`,
       })
       .from(notificationDeliveries)
       .where(eq(notificationDeliveries.id, deliveryId))
@@ -101,7 +102,21 @@ export class NotificationDeliveryRepository {
       );
     }
 
-    return result.now;
+    const databaseTime: unknown = result.now;
+
+    const now =
+      databaseTime instanceof Date
+        ? databaseTime
+        : new Date(String(databaseTime));
+
+    if (Number.isNaN(now.getTime())) {
+      throw new AppError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        "Database returned an invalid timestamp for notification delivery.",
+      );
+    }
+
+    return now;
   }
 
   /**
