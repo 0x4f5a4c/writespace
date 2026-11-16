@@ -24,6 +24,8 @@ import {
   resetPasswordLimiter,
 } from "@shared/middlewares/rate-limit.middleware";
 
+import { requireTrustedOriginForCookieAuth } from "@shared/middlewares/trusted-origin.middleware";
+
 const router = Router();
 
 // Standard Auth
@@ -85,8 +87,17 @@ router.put(
   UserController.updatePassword,
 );
 
-router.post("/refresh-token", authController.refreshToken);
-router.post("/logout", authController.logout);
+router.post(
+  "/refresh-token",
+  requireTrustedOriginForCookieAuth,
+  authController.refreshToken,
+);
+
+router.post(
+  "/logout",
+  requireTrustedOriginForCookieAuth,
+  authController.logout,
+);
 
 // Google Auth
 router.get(
