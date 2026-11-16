@@ -1,6 +1,7 @@
 export interface IJwtPayload {
   id: string;
   role: string;
+  sid: string;
 }
 
 export interface IOAuthProfile {
