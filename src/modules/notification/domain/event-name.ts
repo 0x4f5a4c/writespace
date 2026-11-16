@@ -1,12 +1,8 @@
 /**
- * Canonical names for events currently supported by the notification
- * event pipeline.
+ * Canonical names for domain events supported by the notification pipeline.
  *
- * These names are based on the interaction event vocabulary already
- * present in src/db/schema/interaction-events.ts.
- *
- * Keep this list independent from PostgreSQL enums. New event names should
- * be introduced here together with their payload schema and registry entry.
+ * New event names must be introduced together with their payload schema,
+ * registry entry and consumer behaviour.
  */
 export const DOMAIN_EVENT_NAMES = [
   "reaction.added",
@@ -20,12 +16,13 @@ export const DOMAIN_EVENT_NAMES = [
   "comment.created",
   "comment.replied",
   "mention.created",
+  "auth.security_alert",
 ] as const;
 
 export type DomainEventName = (typeof DOMAIN_EVENT_NAMES)[number];
 
 /**
- * Runtime guard for values arriving from persisted rows, queues, or other
+ * Runtime guard for values arriving from persisted rows, queues or other
  * boundaries where TypeScript types are not available.
  */
 const domainEventNameSet: ReadonlySet<string> = new Set(DOMAIN_EVENT_NAMES);
