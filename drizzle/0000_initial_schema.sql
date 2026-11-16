@@ -52,6 +52,103 @@ CREATE TABLE "follows" (
 	CONSTRAINT "follows_follower_id_following_id_pk" PRIMARY KEY("follower_id","following_id")
 );
 --> statement-breakpoint
+CREATE TABLE "auth_identities" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"provider" text NOT NULL,
+	"provider_subject" text,
+	"password_hash" text,
+	"last_used_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "auth_identities_provider_check" CHECK ("auth_identities"."provider" IN ('password', 'google', 'github')),
+	CONSTRAINT "auth_identities_credentials_check" CHECK ((
+        (
+          "auth_identities"."provider" = 'password'
+          AND "auth_identities"."password_hash" IS NOT NULL
+          AND "auth_identities"."provider_subject" IS NULL
+        )
+        OR
+        (
+          "auth_identities"."provider" IN ('google', 'github')
+          AND "auth_identities"."provider_subject" IS NOT NULL
+          AND "auth_identities"."password_hash" IS NULL
+        )
+      ))
+);
+--> statement-breakpoint
+CREATE TABLE "auth_sessions" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"client_type" text DEFAULT 'web' NOT NULL,
+	"platform" text,
+	"device_label" text,
+	"user_agent_summary" text,
+	"first_ip" text,
+	"last_ip" text,
+	"auth_time" timestamp with time zone DEFAULT now() NOT NULL,
+	"auth_methods" text[] DEFAULT ARRAY[]::text[] NOT NULL,
+	"assurance_level" integer DEFAULT 1 NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"last_seen_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"last_refresh_at" timestamp with time zone,
+	"idle_expires_at" timestamp with time zone NOT NULL,
+	"absolute_expires_at" timestamp with time zone NOT NULL,
+	"revoked_at" timestamp with time zone,
+	"revoke_reason" text,
+	CONSTRAINT "auth_sessions_client_type_check" CHECK ("auth_sessions"."client_type" IN ('web', 'native')),
+	CONSTRAINT "auth_sessions_assurance_level_check" CHECK ("auth_sessions"."assurance_level" BETWEEN 1 AND 3),
+	CONSTRAINT "auth_sessions_absolute_expiry_check" CHECK ("auth_sessions"."absolute_expires_at" > "auth_sessions"."created_at"),
+	CONSTRAINT "auth_sessions_idle_expiry_check" CHECK ("auth_sessions"."idle_expires_at" <= "auth_sessions"."absolute_expires_at")
+);
+--> statement-breakpoint
+CREATE TABLE "refresh_tokens" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"session_id" uuid NOT NULL,
+	"token_hash" text NOT NULL,
+	"parent_token_id" uuid,
+	"replaced_by_token_id" uuid,
+	"issued_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"expires_at" timestamp with time zone NOT NULL,
+	"consumed_at" timestamp with time zone,
+	"revoked_at" timestamp with time zone,
+	"reuse_detected_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "refresh_tokens_expiry_check" CHECK ("refresh_tokens"."expires_at" > "refresh_tokens"."issued_at")
+);
+--> statement-breakpoint
+CREATE TABLE "auth_challenges" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid,
+	"purpose" text NOT NULL,
+	"target_email" text NOT NULL,
+	"secret_hash" text NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"max_attempts" integer DEFAULT 5 NOT NULL,
+	"expires_at" timestamp with time zone NOT NULL,
+	"consumed_at" timestamp with time zone,
+	"revoked_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "auth_challenges_purpose_check" CHECK ("auth_challenges"."purpose" IN (
+        'registration',
+        'email_verification',
+        'password_reset',
+        'email_change'
+      )),
+	CONSTRAINT "auth_challenges_attempts_check" CHECK ("auth_challenges"."attempts" >= 0 AND "auth_challenges"."max_attempts" > 0)
+);
+--> statement-breakpoint
+CREATE TABLE "security_events" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid,
+	"session_id" uuid,
+	"event_type" text NOT NULL,
+	"outcome" text NOT NULL,
+	"reason" text,
+	"metadata" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"occurred_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "content_items" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"content_type" "content_item_type" NOT NULL,
@@ -253,6 +350,13 @@ CREATE TABLE "notification_deliveries" (
 	"locked_at" timestamp with time zone,
 	"locked_by" text,
 	"lease_expires_at" timestamp with time zone,
+	"reconciliation_attempt_count" integer DEFAULT 0 NOT NULL,
+	"next_reconciliation_at" timestamp with time zone,
+	"reconciliation_locked_at" timestamp with time zone,
+	"reconciliation_locked_by" text,
+	"reconciliation_lease_expires_at" timestamp with time zone,
+	"reconciliation_last_attempt_at" timestamp with time zone,
+	"reconciliation_last_error" text,
 	"accepted_at" timestamp with time zone,
 	"confirmed_delivered_at" timestamp with time zone,
 	"provider_message_id" text,
@@ -301,6 +405,21 @@ CREATE TABLE "notification_deliveries" (
           AND "notification_deliveries"."locked_at" IS NULL
           AND "notification_deliveries"."locked_by" IS NULL
           AND "notification_deliveries"."lease_expires_at" IS NULL
+        )
+      )),
+	CONSTRAINT "notification_deliveries_reconciliation_attempt_count_check" CHECK ("notification_deliveries"."reconciliation_attempt_count" >= 0),
+	CONSTRAINT "notification_deliveries_reconciliation_lease_state_check" CHECK ((
+        (
+          "notification_deliveries"."reconciliation_locked_at" IS NULL
+          AND "notification_deliveries"."reconciliation_locked_by" IS NULL
+          AND "notification_deliveries"."reconciliation_lease_expires_at" IS NULL
+        )
+        OR
+        (
+          "notification_deliveries"."reconciliation_locked_at" IS NOT NULL
+          AND "notification_deliveries"."reconciliation_locked_by" IS NOT NULL
+          AND length(trim("notification_deliveries"."reconciliation_locked_by")) > 0
+          AND "notification_deliveries"."reconciliation_lease_expires_at" IS NOT NULL
         )
       ))
 );
@@ -399,6 +518,14 @@ CREATE TABLE "processed_events" (
 --> statement-breakpoint
 ALTER TABLE "follows" ADD CONSTRAINT "follows_follower_id_users_id_fk" FOREIGN KEY ("follower_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "follows" ADD CONSTRAINT "follows_following_id_users_id_fk" FOREIGN KEY ("following_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "auth_identities" ADD CONSTRAINT "auth_identities_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "auth_sessions" ADD CONSTRAINT "auth_sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_session_id_auth_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."auth_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_parent_token_id_refresh_tokens_id_fk" FOREIGN KEY ("parent_token_id") REFERENCES "public"."refresh_tokens"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_replaced_by_token_id_refresh_tokens_id_fk" FOREIGN KEY ("replaced_by_token_id") REFERENCES "public"."refresh_tokens"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "auth_challenges" ADD CONSTRAINT "auth_challenges_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "security_events" ADD CONSTRAINT "security_events_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "security_events" ADD CONSTRAINT "security_events_session_id_auth_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."auth_sessions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "content_items" ADD CONSTRAINT "content_items_author_id_users_id_fk" FOREIGN KEY ("author_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "posts" ADD CONSTRAINT "posts_id_content_items_id_fk" FOREIGN KEY ("id") REFERENCES "public"."content_items"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "articles" ADD CONSTRAINT "articles_id_content_items_id_fk" FOREIGN KEY ("id") REFERENCES "public"."content_items"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -432,6 +559,23 @@ ALTER TABLE "notification_delivery_attempts" ADD CONSTRAINT "notification_delive
 ALTER TABLE "interaction_events" ADD CONSTRAINT "interaction_events_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "outbox_events" ADD CONSTRAINT "outbox_events_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "follows_following_created_idx" ON "follows" USING btree ("following_id","created_at");--> statement-breakpoint
+CREATE INDEX "auth_identities_user_idx" ON "auth_identities" USING btree ("user_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "auth_identities_provider_subject_uq" ON "auth_identities" USING btree ("provider","provider_subject") WHERE "auth_identities"."provider_subject" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "auth_identities_user_password_uq" ON "auth_identities" USING btree ("user_id") WHERE "auth_identities"."provider" = 'password';--> statement-breakpoint
+CREATE INDEX "auth_sessions_user_created_idx" ON "auth_sessions" USING btree ("user_id","created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "auth_sessions_active_user_idx" ON "auth_sessions" USING btree ("user_id","created_at" DESC NULLS LAST) WHERE "auth_sessions"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "refresh_tokens_token_hash_uq" ON "refresh_tokens" USING btree ("token_hash");--> statement-breakpoint
+CREATE INDEX "refresh_tokens_session_issued_idx" ON "refresh_tokens" USING btree ("session_id","issued_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "refresh_tokens_expiry_idx" ON "refresh_tokens" USING btree ("expires_at");--> statement-breakpoint
+CREATE UNIQUE INDEX "refresh_tokens_parent_uq" ON "refresh_tokens" USING btree ("parent_token_id") WHERE "refresh_tokens"."parent_token_id" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "refresh_tokens_replacement_uq" ON "refresh_tokens" USING btree ("replaced_by_token_id") WHERE "refresh_tokens"."replaced_by_token_id" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "auth_challenges_secret_hash_uq" ON "auth_challenges" USING btree ("secret_hash");--> statement-breakpoint
+CREATE INDEX "auth_challenges_active_lookup_idx" ON "auth_challenges" USING btree ("target_email","purpose","created_at" DESC NULLS LAST) WHERE "auth_challenges"."consumed_at" IS NULL
+          AND "auth_challenges"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "auth_challenges_user_idx" ON "auth_challenges" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "security_events_user_occurred_idx" ON "security_events" USING btree ("user_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "security_events_session_occurred_idx" ON "security_events" USING btree ("session_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "security_events_type_occurred_idx" ON "security_events" USING btree ("event_type","occurred_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "content_items_status_publish_date_id_idx" ON "content_items" USING btree ("status","publish_date","id");--> statement-breakpoint
 CREATE INDEX "content_items_status_scheduled_at_idx" ON "content_items" USING btree ("status","scheduled_at");--> statement-breakpoint
 CREATE INDEX "content_items_author_created_idx" ON "content_items" USING btree ("author_id","created_at");--> statement-breakpoint
@@ -464,6 +608,8 @@ CREATE INDEX "notification_deliveries_processing_lease_idx" ON "notification_del
 CREATE INDEX "notification_deliveries_recipient_created_idx" ON "notification_deliveries" USING btree ("recipient_user_id","created_at");--> statement-breakpoint
 CREATE INDEX "notification_deliveries_notification_idx" ON "notification_deliveries" USING btree ("notification_id");--> statement-breakpoint
 CREATE INDEX "notification_deliveries_group_idx" ON "notification_deliveries" USING btree ("group_id");--> statement-breakpoint
+CREATE INDEX "notification_deliveries_reconciliation_schedule_idx" ON "notification_deliveries" USING btree ("status","eligibility_decision","next_reconciliation_at","created_at");--> statement-breakpoint
+CREATE INDEX "notification_deliveries_reconciliation_lease_idx" ON "notification_deliveries" USING btree ("reconciliation_lease_expires_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "notification_delivery_attempts_delivery_number_uq" ON "notification_delivery_attempts" USING btree ("delivery_id","attempt_number");--> statement-breakpoint
 CREATE INDEX "notification_delivery_attempts_delivery_idx" ON "notification_delivery_attempts" USING btree ("delivery_id","attempt_number");--> statement-breakpoint
 CREATE UNIQUE INDEX "notification_suppressions_channel_destination_uq" ON "notification_suppressions" USING btree ("channel","destination_fingerprint");--> statement-breakpoint

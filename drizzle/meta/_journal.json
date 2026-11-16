@@ -5,15 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1794177102727,
-      "tag": "0000_initial-schema",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1794369457279,
-      "tag": "0001_shocking_marauders",
+      "when": 1794828422340,
+      "tag": "0000_initial_schema",
       "breakpoints": true
     }
   ]

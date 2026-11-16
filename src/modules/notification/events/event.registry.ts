@@ -6,6 +6,7 @@ import { AppError } from "@shared/utils/app.error";
 import type { DomainEventName } from "../domain/event-name";
 
 import {
+  authSecurityAlertEventPayloadSchema,
   mentionCreatedEventPayloadSchema,
   commentRepliedEventPayloadSchema,
   commentCreatedEventPayloadSchema,
@@ -26,11 +27,7 @@ interface EventDefinition {
 /**
  * Registry of event contracts currently supported by this application.
  *
- * Adding a new event requires:
- * 1. Adding its name to DOMAIN_EVENT_NAMES.
- * 2. Defining its payload schema.
- * 3. Registering its supported version here.
- * 4. Implementing the consumer behaviour where required.
+ * Every event requires a name, payload schema and supported version.
  */
 export const eventRegistry = {
   "reaction.added": {
@@ -72,6 +69,7 @@ export const eventRegistry = {
     version: 1,
     payloadSchema: shareEventPayloadSchema,
   },
+
   "comment.created": {
     version: 1,
     payloadSchema: commentCreatedEventPayloadSchema,
@@ -86,11 +84,15 @@ export const eventRegistry = {
     version: 1,
     payloadSchema: mentionCreatedEventPayloadSchema,
   },
+
+  "auth.security_alert": {
+    version: 1,
+    payloadSchema: authSecurityAlertEventPayloadSchema,
+  },
 } satisfies Record<DomainEventName, EventDefinition>;
 
 /**
- * Maps each registered event name to the payload type inferred from
- * its registered Zod schema.
+ * Maps each registered event name to its inferred payload type.
  */
 export type EventPayloadMap = {
   [TName in DomainEventName]: z.infer<
@@ -107,10 +109,6 @@ export function getEventVersion(eventName: DomainEventName): number {
 
 /**
  * Validates an event payload against its registered schema and version.
- *
- * Unsupported versions are permanent compatibility errors. Invalid
- * payloads throw ZodError; the event processor translates those into
- * AppError at its application boundary.
  */
 export function parseEventPayload<TName extends DomainEventName>(
   eventName: TName,

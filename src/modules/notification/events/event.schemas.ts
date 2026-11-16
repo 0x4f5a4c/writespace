@@ -1,29 +1,37 @@
 import { z } from "zod";
 
-import { reactionTypes } from "../../../db/schema/content-reactions";
+import { reactionTypes } from "@db/schema/content-reactions";
 import { DOMAIN_EVENT_NAMES } from "../domain/event-name";
+import { AUTH_SECURITY_EVENT_TYPES } from "./auth-security-event.types";
 
 /**
  * Runtime schema for the supported event-name vocabulary.
- *
- * This is useful when reading an event from PostgreSQL or a queue because
- * persisted data is not protected by TypeScript's compile-time checks.
  */
 export const domainEventNameSchema = z.enum(DOMAIN_EVENT_NAMES);
 
 /**
  * Shared UUID validation for event payload identifiers.
- *
- * These identifiers are validated at the application boundary even when
- * the payload is stored as JSONB and therefore has no relational FK.
  */
 const uuidSchema = z.string().uuid();
 
 /**
- * Reactions are valid for either a content item or a comment.
+ * Authentication security events contain references only.
  *
- * The legacy POST target is normalised to CONTENT_ITEM by the existing
- * interaction event mapper before it reaches this event contract.
+ * Passwords, tokens, OTPs, session secrets and email addresses must never
+ * be copied into the notification event payload.
+ */
+export const authSecurityAlertEventPayloadSchema = z.strictObject({
+  securityEventId: uuidSchema,
+  recipientUserId: uuidSchema,
+  securityEventType: z.enum(AUTH_SECURITY_EVENT_TYPES),
+});
+
+export type AuthSecurityAlertEventPayload = z.infer<
+  typeof authSecurityAlertEventPayloadSchema
+>;
+
+/**
+ * Reactions are valid for either a content item or a comment.
  */
 export const reactionEventPayloadSchema = z.strictObject({
   targetType: z.enum(["CONTENT_ITEM", "COMMENT"]),
@@ -33,7 +41,6 @@ export const reactionEventPayloadSchema = z.strictObject({
 
 /**
  * A follow event targets the user who was followed or unfollowed.
- * The actor is carried at the event-envelope level.
  */
 export const followEventPayloadSchema = z.strictObject({
   targetUserId: uuidSchema,
@@ -41,16 +48,13 @@ export const followEventPayloadSchema = z.strictObject({
 
 /**
  * Save events are associated with the shared content-item model.
- * This supports both Posts and Articles.
  */
 export const saveEventPayloadSchema = z.strictObject({
   contentItemId: uuidSchema,
 });
 
 /**
- * A share event records the content item and the platform selected by
- * the user. The platform remains a bounded string because the existing
- * share contract accepts platform names as strings.
+ * A share event records the content item and selected platform.
  */
 export const shareEventPayloadSchema = z.strictObject({
   contentItemId: uuidSchema,
@@ -59,9 +63,6 @@ export const shareEventPayloadSchema = z.strictObject({
 
 /**
  * A top-level comment was created on a published Post or Article.
- *
- * The actor is carried by the event envelope. These identifiers let the
- * consumer verify that the comment still exists and belongs to the content.
  */
 export const commentCreatedEventPayloadSchema = z.strictObject({
   contentItemId: uuidSchema,
@@ -70,8 +71,6 @@ export const commentCreatedEventPayloadSchema = z.strictObject({
 
 /**
  * A user replied to an existing comment.
- *
- * The reply and its parent must belong to the same content item.
  */
 export const commentRepliedEventPayloadSchema = z.strictObject({
   contentItemId: uuidSchema,
@@ -81,9 +80,6 @@ export const commentRepliedEventPayloadSchema = z.strictObject({
 
 /**
  * A user was newly mentioned in a published Post or Article.
- *
- * The content author is the event actor. The mentioned user is
- * the intended notification recipient.
  */
 export const mentionCreatedEventPayloadSchema = z.strictObject({
   contentItemId: uuidSchema,

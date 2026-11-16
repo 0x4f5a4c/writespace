@@ -2,6 +2,13 @@
 export * from "./users";
 export * from "./follows";
 
+// Authentication identities, sessions, and security.
+export * from "./auth-identities";
+export * from "./auth-sessions";
+export * from "./refresh-tokens";
+export * from "./auth-challenges";
+export * from "./security-events";
+
 // Shared content model and its two content types.
 export * from "./content-document";
 export * from "./content-items";

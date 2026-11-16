@@ -303,6 +303,24 @@ const envSchema = z
     JWT_ACCESS_SECRET: z.string().min(1, "JWT_ACCESS_SECRET is required"),
     JWT_REFRESH_SECRET: z.string().min(1, "JWT_REFRESH_SECRET is required"),
     JWT_ACCESS_EXPIRE: z.string().default("15m"),
+    // Session lifecycle
+    SESSION_IDLE_TIMEOUT_SECONDS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(7 * 24 * 60 * 60),
+
+    SESSION_ABSOLUTE_TIMEOUT_SECONDS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(30 * 24 * 60 * 60),
+    AUTH_CHALLENGE_SECRET: z
+      .string()
+      .regex(
+        /^[a-fA-F0-9]{64}$/,
+        "AUTH_CHALLENGE_SECRET must be a 64-character hexadecimal secret",
+      ),
 
     // Cloudinary
 

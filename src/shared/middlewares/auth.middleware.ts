@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { AppError } from "../utils/app.error";
 import { HTTP_STATUS } from "../constants/http-codes";
 import { IJwtPayload } from "@modules/auth/interface/auth.interface";
+import { sessionService } from "@modules/sessions/session.service";
 import env from "@config/env";
 
 const UUID_REGEX =
@@ -18,6 +19,8 @@ const isValidJwtPayload = (payload: unknown): payload is IJwtPayload => {
   return (
     typeof data.id === "string" &&
     UUID_REGEX.test(data.id) &&
+    typeof data.sid === "string" &&
+    UUID_REGEX.test(data.sid) &&
     (data.role === "user" || data.role === "admin")
   );
 };
@@ -54,9 +57,24 @@ export const authenticate = async (
       throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid token payload");
     }
 
+    // Verify that the session associated with this access token
+    // is still active and belongs to the authenticated account.
+    const sessionIsValid = await sessionService.isSessionValidForAccess(
+      decoded.sid,
+      decoded.id,
+    );
+
+    if (!sessionIsValid) {
+      throw new AppError(
+        HTTP_STATUS.UNAUTHORIZED,
+        "Session expired or revoked",
+      );
+    }
+
     req.user = {
       id: decoded.id,
       role: decoded.role,
+      sessionId: decoded.sid,
     };
 
     next();

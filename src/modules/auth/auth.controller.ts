@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { authService } from "./auth.service";
 import { ApiResponse } from "@shared/utils/api-response";
+import { AppError } from "@shared/utils/app.error";
+import type { AuthSessionContext } from "../sessions/session.service";
 import { HTTP_STATUS } from "@shared/constants/http-codes";
 import { RegisterInput } from "./dtos/register.dto";
 import { LoginInput } from "./dtos/login.dto";
@@ -19,7 +21,7 @@ const REFRESH_COOKIE_OPTIONS = {
   secure: isProd,
   sameSite: isProd ? ("none" as const) : ("lax" as const),
   path: "/",
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days, matching JWT_REFRESH_EXPIRE
+  maxAge: env.SESSION_IDLE_TIMEOUT_SECONDS * 1000,
 };
 
 type EmptyParams = Record<string, never>;
@@ -65,6 +67,40 @@ function getVerifiedOAuthEmail(emails: unknown): string | undefined {
   );
 }
 
+/**
+ * Extracts descriptive client metadata for the durable session record.
+ *
+ * Client metadata is supplied by the client and must never be treated
+ * as proof of device identity or as an authorization factor.
+ *
+ * Existing clients default to web for backward compatibility.
+ */
+function getAuthSessionContext(req: Request): AuthSessionContext {
+  const requestedClientType = req.get("x-client-type")?.trim().toLowerCase();
+
+  if (
+    requestedClientType &&
+    requestedClientType !== "web" &&
+    requestedClientType !== "native"
+  ) {
+    throw new AppError(
+      HTTP_STATUS.BAD_REQUEST,
+      "Invalid client type. Expected web or native.",
+    );
+  }
+
+  return {
+    clientType: requestedClientType === "native" ? "native" : "web",
+    platform:
+      req.get("x-client-platform") ||
+      req.get("sec-ch-ua-platform") ||
+      undefined,
+    deviceLabel: req.get("x-device-label") || undefined,
+    userAgentSummary: req.get("user-agent") || undefined,
+    ipAddress: req.ip || req.socket.remoteAddress || undefined,
+  };
+}
+
 export class AuthController {
   public async register(
     req: Request<EmptyParams, unknown, RegisterInput>,
@@ -87,15 +123,34 @@ export class AuthController {
   ) {
     try {
       const { email, otp } = req.body;
+      const sessionContext = getAuthSessionContext(req);
+
       const { user, accessToken, refreshToken } =
-        await authService.verifyRegistration(email, otp);
+        await authService.verifyRegistration(email, otp, sessionContext);
 
-      res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
-
-      new ApiResponse(res, HTTP_STATUS.CREATED, "Registration successful", {
+      const responseData: {
+        user: typeof user;
+        accessToken: string;
+        refreshToken?: string;
+      } = {
         user,
         accessToken,
-      }).send();
+      };
+
+      if (sessionContext.clientType === "web") {
+        res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
+      } else {
+        // Native clients must receive the opaque credential to store
+        // in platform-secure storage such as Android Keystore-backed storage.
+        responseData.refreshToken = refreshToken;
+      }
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.CREATED,
+        "Registration successful",
+        responseData,
+      ).send();
     } catch (error) {
       next(error);
     }
@@ -108,18 +163,36 @@ export class AuthController {
     next: NextFunction,
   ) {
     try {
-      const ip = req.ip || req.socket.remoteAddress || "Unknown IP";
+      const sessionContext = getAuthSessionContext(req);
+      const ip = sessionContext.ipAddress ?? "Unknown IP";
+
       const { user, accessToken, refreshToken } = await authService.login(
         req.body,
         ip,
+        sessionContext,
       );
 
-      res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
-
-      new ApiResponse(res, HTTP_STATUS.OK, "Login successful", {
+      const responseData: {
+        user: typeof user;
+        accessToken: string;
+        refreshToken?: string;
+      } = {
         user,
         accessToken,
-      }).send();
+      };
+
+      if (sessionContext.clientType === "web") {
+        res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
+      } else {
+        responseData.refreshToken = refreshToken;
+      }
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Login successful",
+        responseData,
+      ).send();
     } catch (error) {
       next(error);
     }
@@ -128,15 +201,20 @@ export class AuthController {
   // 4. Refresh Token
   public async refreshToken(req: Request, res: Response, next: NextFunction) {
     try {
-      // 100% Type Safe Cookie Parsing
+      const sessionContext = getAuthSessionContext(req);
+
       const cookies = req.cookies as Record<string, string> | undefined;
       const body = req.body as Record<string, unknown> | undefined;
 
+      const cookieRefreshToken = cookies?.refreshToken;
+      const bodyRefreshToken =
+        typeof body?.refreshToken === "string" ? body.refreshToken : undefined;
+
+      // Prefer the credential appropriate to the declared client type.
       const refreshToken =
-        cookies?.refreshToken ||
-        (typeof body?.refreshToken === "string"
-          ? body.refreshToken
-          : undefined);
+        sessionContext.clientType === "native"
+          ? bodyRefreshToken || cookieRefreshToken
+          : cookieRefreshToken || bodyRefreshToken;
 
       if (!refreshToken) {
         new ApiResponse(
@@ -149,19 +227,37 @@ export class AuthController {
       }
 
       const tokens = await authService.refreshToken(refreshToken);
-      res.cookie("refreshToken", tokens.refreshToken, REFRESH_COOKIE_OPTIONS);
 
-      new ApiResponse(res, HTTP_STATUS.OK, "Token refreshed", {
+      const responseData: {
+        accessToken: string;
+        refreshToken?: string;
+      } = {
         accessToken: tokens.accessToken,
-      }).send();
+      };
+
+      if (sessionContext.clientType === "web") {
+        res.cookie("refreshToken", tokens.refreshToken, REFRESH_COOKIE_OPTIONS);
+      } else {
+        responseData.refreshToken = tokens.refreshToken;
+      }
+
+      new ApiResponse(
+        res,
+        HTTP_STATUS.OK,
+        "Token refreshed",
+        responseData,
+      ).send();
     } catch (error) {
       next(error);
     }
   }
 
   // 5. Logout
+  // 5. Logout
   public async logout(req: Request, res: Response, next: NextFunction) {
     try {
+      const sessionContext = getAuthSessionContext(req);
+
       // Safely read a refresh token from an untrusted object.
       const readRefreshToken = (source: unknown): string | undefined => {
         if (
@@ -179,18 +275,28 @@ export class AuthController {
           : undefined;
       };
 
-      // Prefer the HttpOnly cookie, with request-body fallback.
+      // Prefer the credential appropriate to the declared client type.
       const cookieRefreshToken = readRefreshToken(req.cookies as unknown);
       const bodyRefreshToken = readRefreshToken(req.body as unknown);
 
-      const refreshToken = cookieRefreshToken || bodyRefreshToken;
+      const refreshToken =
+        sessionContext.clientType === "native"
+          ? bodyRefreshToken || cookieRefreshToken
+          : cookieRefreshToken || bodyRefreshToken;
 
       if (refreshToken) {
         await authService.logout(refreshToken);
       }
 
       // Clear the browser's refresh-token cookie.
-      res.clearCookie("refreshToken");
+      if (sessionContext.clientType === "web") {
+        res.clearCookie("refreshToken", {
+          httpOnly: true,
+          secure: isProd,
+          sameSite: isProd ? "none" : "lax",
+          path: "/",
+        });
+      }
 
       new ApiResponse(
         res,
@@ -254,6 +360,15 @@ export class AuthController {
         return;
       }
 
+      const sessionContext = getAuthSessionContext(req);
+
+      if (sessionContext.clientType !== "web") {
+        throw new AppError(
+          HTTP_STATUS.BAD_REQUEST,
+          "Native OAuth authentication is not supported by this callback yet.",
+        );
+      }
+
       const profile = {
         provider: "google" as const,
         providerId: driverUser.id,
@@ -262,7 +377,10 @@ export class AuthController {
         picture: driverUser.photos?.[0]?.value,
       };
 
-      const { refreshToken } = await authService.googleAuth(profile);
+      const { refreshToken } = await authService.googleAuth(
+        profile,
+        sessionContext,
+      );
 
       res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
 
@@ -290,6 +408,15 @@ export class AuthController {
         return;
       }
 
+      const sessionContext = getAuthSessionContext(req);
+
+      if (sessionContext.clientType !== "web") {
+        throw new AppError(
+          HTTP_STATUS.BAD_REQUEST,
+          "Native OAuth authentication is not supported by this callback yet.",
+        );
+      }
+
       const profile = {
         provider: "github" as const,
         providerId: driverUser.id,
@@ -299,7 +426,10 @@ export class AuthController {
         picture: driverUser.photos?.[0]?.value,
       };
 
-      const { refreshToken } = await authService.githubAuth(profile);
+      const { refreshToken } = await authService.githubAuth(
+        profile,
+        sessionContext,
+      );
 
       res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
 

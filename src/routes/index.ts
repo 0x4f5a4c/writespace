@@ -8,6 +8,7 @@ import { aiRoutes } from "@modules/ai/ai.routes";
 import { notificationRoutes } from "@modules/notification/notification.routes";
 import { interactionsRoutes } from "@modules/interactions/interactions.routes";
 import { notificationPreferenceRoutes } from "@modules/notification/notification-preference.routes";
+import { sessionRoutes } from "@modules/sessions/session.routes";
 
 const router = Router();
 
@@ -16,6 +17,7 @@ const router = Router();
  */
 router.use("/auth", authRoutes);
 router.use("/users", userRoutes);
+router.use("/sessions", sessionRoutes);
 
 /**
  * Content modules.

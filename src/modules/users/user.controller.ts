@@ -105,11 +105,15 @@ export class UserController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      if (!req.user?.id) {
+      if (!req.user?.id || !req.user.sessionId) {
         throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Authentication required");
       }
 
-      const result = await UserService.updatePassword(req.user.id, req.body);
+      const result = await UserService.updatePassword(
+        req.user.id,
+        req.user.sessionId,
+        req.body,
+      );
 
       new ApiResponse(res, HTTP_STATUS.OK, result.message, null).send();
     } catch (error) {

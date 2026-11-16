@@ -218,7 +218,9 @@ notificationDeliveryEventsWorker.on("failed", (job, error) => {
     jobId: job?.id,
     eventId: job?.data?.eventId,
     attemptsMade: job?.attemptsMade,
-    error,
+    errorName: error?.name,
+    errorMessage: error?.message,
+    errorStack: error?.stack,
   });
 });
 

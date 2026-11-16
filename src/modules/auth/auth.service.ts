@@ -1,23 +1,44 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import { eq, or } from "drizzle-orm";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "crypto";
+import { and, eq, gt, isNull, or } from "drizzle-orm";
+
 import { db } from "../../db";
-import { users, type User } from "../../db/schema";
+import { authChallenges, authIdentities, users, type User } from "@db/schema";
 import { client as redis } from "@config/redis";
 import env from "@config/env";
+
 import { AppError } from "@shared/utils/app.error";
 import { HTTP_STATUS } from "@shared/constants/http-codes";
+
 import { notificationService } from "../notification/notification.service";
+import {
+  sessionService,
+  type AuthSessionContext,
+} from "../sessions/session.service";
+import type { SessionCreationSecurityEvent } from "../sessions/session.repository";
+
+import {
+  securityEventRepository,
+  SECURITY_EVENT_OUTCOMES,
+  SECURITY_EVENT_TYPES,
+} from "../sessions/security-event.repository";
+
 import { RegisterInput } from "./dtos/register.dto";
 import { LoginInput } from "./dtos/login.dto";
 import { generateOTP } from "./auth.utils";
-import { IJwtPayload, IOAuthProfile } from "./interface/auth.interface";
+import { IOAuthProfile } from "./interface/auth.interface";
+
 import logger from "@config/logger";
 import { PublicUser } from "../users/interface/user.interface";
 
 const ACCESS_TOKEN_EXPIRE = env.JWT_ACCESS_EXPIRE;
-const REFRESH_TOKEN_EXPIRE = "7d";
-const REFRESH_TOKEN_EXPIRE_SEC = 7 * 24 * 60 * 60;
 const OTP_EXPIRE_SEC = 10 * 60;
 const RESET_TOKEN_EXPIRE_SEC = 60 * 60;
 const SALT_ROUNDS = 12;
@@ -29,7 +50,8 @@ const SALT_ROUNDS = 12;
  */
 type PendingRegistration = Omit<RegisterInput, "password"> & {
   passwordHash: string;
-  otp: string;
+  challengeId: string;
+  otpHash: string;
 };
 
 function isPendingRegistration(value: unknown): value is PendingRegistration {
@@ -44,44 +66,52 @@ function isPendingRegistration(value: unknown): value is PendingRegistration {
     typeof candidate.username === "string" &&
     typeof candidate.email === "string" &&
     typeof candidate.passwordHash === "string" &&
-    typeof candidate.otp === "string" &&
-    /^\d{6}$/.test(candidate.otp)
+    typeof candidate.challengeId === "string" &&
+    candidate.challengeId.length > 0 &&
+    typeof candidate.otpHash === "string" &&
+    /^[a-f0-9]{64}$/i.test(candidate.otpHash)
   );
 }
 
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Creates a challenge-specific digest for a registration OTP.
+ *
+ * HMAC prevents a Redis-only data exposure from revealing the OTP through
+ * offline guessing. The challenge ID and email bind the digest to one
+ * registration attempt.
+ */
+function createRegistrationOtpDigest(
+  challengeId: string,
+  email: string,
+  otp: string,
+): string {
+  return createHmac("sha256", Buffer.from(env.AUTH_CHALLENGE_SECRET, "hex"))
+    .update(`${challengeId}:${email}:${otp}`)
+    .digest("hex");
+}
 
 /**
- * Validates the decoded refresh-token payload at runtime.
- * A TypeScript type assertion alone does not validate JWT contents.
+ * Hashes a high-entropy password-reset token before storing it.
+ *
+ * The raw token is only needed when constructing the email link and verifying
+ * the user's submission. The database stores only its SHA-256 digest.
  */
-function isValidRefreshTokenPayload(payload: unknown): payload is IJwtPayload {
-  if (typeof payload !== "object" || payload === null) {
-    return false;
-  }
-
-  const candidate = payload as Record<string, unknown>;
-
-  return (
-    typeof candidate.id === "string" &&
-    UUID_REGEX.test(candidate.id) &&
-    (candidate.role === "user" || candidate.role === "admin")
-  );
+function createPasswordResetTokenDigest(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 type AuthPublicUser = Omit<PublicUser, "googleAuth" | "githubAuth">;
 
 function toPublicUser(user: typeof users.$inferSelect): AuthPublicUser {
-  // create a separate object so the original database result remains unchanged.
+  // Create a separate object so the original database result remains unchanged.
   const publicFields = { ...user };
 
-  // remove sensitive authentication and account-management fields.
+  // Remove sensitive authentication and account-management fields.
   Reflect.deleteProperty(publicFields, "passwordHash");
   Reflect.deleteProperty(publicFields, "loginAttempts");
   Reflect.deleteProperty(publicFields, "lockUntil");
 
-  // authentication provider flags are internal implementation details.
+  // Authentication provider flags are internal implementation details.
   Reflect.deleteProperty(publicFields, "googleAuth");
   Reflect.deleteProperty(publicFields, "githubAuth");
 
@@ -113,6 +143,10 @@ class AuthService {
     }
   }
 
+  /**
+   * Starts registration by validating account uniqueness, hashing the
+   * password and storing temporary registration data in Redis.
+   */
   public async initiateRegistration(data: RegisterInput) {
     const [existingUser] = await db
       .select({ id: users.id })
@@ -128,6 +162,7 @@ class AuthService {
     }
 
     const otp = generateOTP(6);
+    const challengeId = randomUUID();
 
     const { password, ...registrationFields } = data;
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -135,8 +170,10 @@ class AuthService {
     const registrationData: PendingRegistration = {
       ...registrationFields,
       passwordHash,
-      otp,
+      challengeId,
+      otpHash: createRegistrationOtpDigest(challengeId, data.email, otp),
     };
+
     await redis.set(
       `auth:register:${data.email}`,
       JSON.stringify(registrationData),
@@ -150,7 +187,17 @@ class AuthService {
     };
   }
 
-  public async verifyRegistration(email: string, otp: string) {
+  /**
+   * Verifies registration OTP and creates the user's account.
+   *
+   * The user record, password identity and registration security event
+   * are created in one transaction.
+   */
+  public async verifyRegistration(
+    email: string,
+    otp: string,
+    context: Partial<AuthSessionContext> = {},
+  ) {
     const registrationKey = `auth:register:${email}`;
 
     // 1. Read pending registration data.
@@ -178,7 +225,17 @@ class AuthService {
     }
 
     // 3. Reject an incorrect OTP without consuming the valid one.
-    if (parsedData.otp !== otp) {
+    const submittedOtpHash = createRegistrationOtpDigest(
+      parsedData.challengeId,
+      parsedData.email,
+      otp,
+    );
+
+    const expectedDigest = Buffer.from(parsedData.otpHash, "hex");
+    const submittedDigest = Buffer.from(submittedOtpHash, "hex");
+
+    // Compare fixed-length digests to avoid timing-dependent string comparison.
+    if (!timingSafeEqual(expectedDigest, submittedDigest)) {
       throw new AppError(HTTP_STATUS.BAD_REQUEST, "Invalid OTP");
     }
 
@@ -190,19 +247,49 @@ class AuthService {
       throw new AppError(HTTP_STATUS.BAD_REQUEST, "OTP expired or invalid");
     }
 
-    // 5. Create the account after successful OTP consumption.
-    const [user] = await db
-      .insert(users)
-      .values({
-        fullname: parsedData.fullname,
-        email: parsedData.email,
-        username: parsedData.username,
-        passwordHash: parsedData.passwordHash,
-      })
-      .returning();
+    // 5. Create the account, password identity and registration event together.
+    const user = await db.transaction(async (tx) => {
+      const [createdUser] = await tx
+        .insert(users)
+        .values({
+          fullname: parsedData.fullname,
+          email: parsedData.email,
+          username: parsedData.username,
+          passwordHash: parsedData.passwordHash,
+        })
+        .returning();
 
-    // 6. Issue authentication tokens.
-    const tokens = await this.signTokens(user.id, user.role);
+      await tx.insert(authIdentities).values({
+        userId: createdUser.id,
+        provider: "password",
+        passwordHash: parsedData.passwordHash,
+      });
+
+      // The registration OTP has been successfully verified.
+      // Record completion without storing the submitted OTP or password.
+      await securityEventRepository.create(tx, {
+        userId: createdUser.id,
+        sessionId: null,
+        eventType: SECURITY_EVENT_TYPES.AUTH_REGISTRATION_COMPLETED,
+        outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+        reason: "email_otp_verified_registration_completed",
+        metadata: {
+          emailVerified: true,
+          authMethod: "password",
+        },
+        occurredAt: new Date(),
+      });
+
+      return createdUser;
+    });
+
+    // 6. Create a durable session and issue authentication tokens.
+    const tokens = await this.signTokens(
+      user.id,
+      user.role,
+      ["password"],
+      context,
+    );
 
     // 7. Send the welcome notification without affecting registration success.
     await this.runNotificationSafely(
@@ -225,7 +312,14 @@ class AuthService {
     };
   }
 
-  public async login(data: LoginInput, ip: string) {
+  /**
+   * Authenticates a user through email and password.
+   */
+  public async login(
+    data: LoginInput,
+    ip: string,
+    context: Partial<AuthSessionContext> = {},
+  ) {
     const [user] = await db
       .select()
       .from(users)
@@ -240,13 +334,32 @@ class AuthService {
       data.password,
       user.passwordHash,
     );
+
     if (!passwordMatch) {
       throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid email or password");
     }
 
     this.ensureAccountIsActive(user.status);
 
-    const tokens = await this.signTokens(user.id, user.role);
+    // Create a separate durable session for this successful login.
+    // The login event is persisted atomically with the session.
+    const tokens = await this.signTokens(
+      user.id,
+      user.role,
+      ["password"],
+      {
+        ...context,
+        ipAddress: context.ipAddress ?? (ip === "Unknown IP" ? undefined : ip),
+      },
+      {
+        eventType: SECURITY_EVENT_TYPES.AUTH_LOGIN,
+        outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+        reason: "password_login",
+        metadata: {
+          authMethod: "password",
+        },
+      },
+    );
 
     await this.runNotificationSafely(
       "login alert",
@@ -268,38 +381,69 @@ class AuthService {
     return { user: toPublicUser(user), ...tokens };
   }
 
-  public async googleAuth(profile: IOAuthProfile) {
-    return this.handleSocialAuth(profile, "googleAuth");
+  public async googleAuth(
+    profile: IOAuthProfile,
+    context: Partial<AuthSessionContext> = {},
+  ) {
+    return this.handleSocialAuth(profile, "googleAuth", context);
   }
 
-  public async githubAuth(profile: IOAuthProfile) {
-    return this.handleSocialAuth(profile, "githubAuth");
+  public async githubAuth(
+    profile: IOAuthProfile,
+    context: Partial<AuthSessionContext> = {},
+  ) {
+    return this.handleSocialAuth(profile, "githubAuth", context);
   }
 
+  /**
+   * Handles Google and GitHub authentication using the provider's
+   * immutable subject ID as the identity lookup key.
+   */
   private async handleSocialAuth(
     profile: IOAuthProfile,
     providerField: "googleAuth" | "githubAuth",
+    context: Partial<AuthSessionContext> = {},
   ) {
-    // Only accept a real email verified by the OAuth provider.
     const email = profile.email.trim();
+    const providerSubject = profile.providerId.trim();
 
-    if (!email) {
+    if (!email || !providerSubject) {
       throw new AppError(
         HTTP_STATUS.UNAUTHORIZED,
-        "A verified email address is required for social login",
+        "A verified email address and provider identity are required",
       );
     }
 
-    const [existingUser] = await db
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
+    // The provider's immutable subject ID is the authoritative identity.
+    // Email addresses can change, so they must not identify an OAuth account.
+    const [existingIdentity] = await db
+      .select({ userId: authIdentities.userId })
+      .from(authIdentities)
+      .where(
+        and(
+          eq(authIdentities.provider, profile.provider),
+          eq(authIdentities.providerSubject, providerSubject),
+        ),
+      )
       .limit(1);
 
-    if (existingUser) {
+    if (existingIdentity) {
+      const [existingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, existingIdentity.userId))
+        .limit(1);
+
+      if (!existingUser) {
+        throw new AppError(
+          HTTP_STATUS.UNAUTHORIZED,
+          "The linked account could not be found",
+        );
+      }
+
       this.ensureAccountIsActive(existingUser.status);
 
-      // Link the provider only after the verified email matches the account.
+      // Keep the legacy provider flag synchronized during the transition.
       if (!existingUser[providerField]) {
         await db
           .update(users)
@@ -307,26 +451,76 @@ class AuthService {
           .where(eq(users.id, existingUser.id));
       }
 
-      return this.signTokens(existingUser.id, existingUser.role);
+      // Record successful OAuth authentication with the new session.
+      return this.signTokens(
+        existingUser.id,
+        existingUser.role,
+        [profile.provider],
+        context,
+        {
+          eventType: SECURITY_EVENT_TYPES.AUTH_OAUTH_LOGIN,
+          outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+          reason: "oauth_login",
+          metadata: {
+            provider: profile.provider,
+          },
+        },
+      );
+    }
+
+    // Do not silently link an OAuth identity to an existing account just
+    // because their email addresses match. Account linking needs an explicit,
+    // authenticated flow that we will implement separately.
+    const [existingUser] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+
+    if (existingUser) {
+      throw new AppError(
+        HTTP_STATUS.CONFLICT,
+        "An account with this email already exists. Sign in using your existing authentication method.",
+      );
     }
 
     const username =
       profile.displayName.toLowerCase().replace(/\s+/g, "") + generateOTP(4);
 
-    const randomPassword = generateOTP(16) + "Aa1!";
-    const passwordHash = await bcrypt.hash(randomPassword, SALT_ROUNDS);
+    // OAuth-only accounts do not receive an artificial password credential.
+    // Create the account, provider identity and audit event together.
+    const newUser = await db.transaction(async (tx) => {
+      const [createdUser] = await tx
+        .insert(users)
+        .values({
+          fullname: profile.displayName,
+          email,
+          username,
+          profileImageUrl: profile.picture || undefined,
+          [providerField]: true,
+        })
+        .returning();
 
-    const [newUser] = await db
-      .insert(users)
-      .values({
-        fullname: profile.displayName,
-        email,
-        username,
-        passwordHash,
-        profileImageUrl: profile.picture || undefined,
-        [providerField]: true,
-      })
-      .returning();
+      await tx.insert(authIdentities).values({
+        userId: createdUser.id,
+        provider: profile.provider,
+        providerSubject,
+      });
+
+      await securityEventRepository.create(tx, {
+        userId: createdUser.id,
+        sessionId: null,
+        eventType: SECURITY_EVENT_TYPES.AUTH_OAUTH_ACCOUNT_CREATED,
+        outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+        reason: "oauth_account_created",
+        metadata: {
+          provider: profile.provider,
+        },
+        occurredAt: new Date(),
+      });
+
+      return createdUser;
+    });
 
     await this.runNotificationSafely(
       "OAuth welcome notification",
@@ -342,97 +536,80 @@ class AuthService {
         ),
     );
 
-    return this.signTokens(newUser.id, newUser.role);
+    return this.signTokens(
+      newUser.id,
+      newUser.role,
+      [profile.provider],
+      context,
+    );
   }
 
+  /**
+   * Rotates an opaque refresh token through the durable session system.
+   *
+   * The repository handles atomic token consumption, successor creation,
+   * session expiry checks, and refresh-token reuse detection.
+   */
   public async refreshToken(oldRefreshToken: string) {
-    let decoded: IJwtPayload;
+    const result = await sessionService.rotateRefreshToken(oldRefreshToken);
 
-    // 1. Verify the refresh token's signature, expiry and payload.
-    try {
-      const payload = jwt.verify(oldRefreshToken, env.JWT_REFRESH_SECRET, {
-        algorithms: ["HS256"],
+    if (result.outcome === "reused") {
+      logger.warn("Refresh token reuse detected", {
+        event: "refresh_token_reuse",
       });
 
-      if (!isValidRefreshTokenPayload(payload)) {
-        throw new Error("Invalid refresh token payload");
-      }
-
-      decoded = payload;
-    } catch {
-      throw new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid Refresh Token");
+      throw new AppError(
+        HTTP_STATUS.UNAUTHORIZED,
+        "Refresh token reuse detected. Please sign in again.",
+      );
     }
 
-    // 2. Atomically consume the old refresh token.
-    // This prevents the same refresh token from being reused.
-    const redisKey = `refresh_token:${decoded.id}:${oldRefreshToken}`;
-    const isValid = await redis.getDel(redisKey);
+    if (result.outcome === "inactive") {
+      throw new AppError(HTTP_STATUS.FORBIDDEN, "Your account is not active");
+    }
 
-    if (!isValid) {
+    if (result.outcome === "invalid") {
       throw new AppError(
         HTTP_STATUS.UNAUTHORIZED,
         "Session expired or invalid",
       );
     }
 
-    // 3. Fetch the latest account status and role from the database.
-    const [user] = await db
-      .select({
-        id: users.id,
-        role: users.role,
-        status: users.status,
-      })
-      .from(users)
-      .where(eq(users.id, decoded.id))
-      .limit(1);
-
-    if (!user) {
-      throw new AppError(HTTP_STATUS.UNAUTHORIZED, "User not found");
-    }
-
-    // 4. Do not issue tokens to suspended or banned accounts.
-    this.ensureAccountIsActive(user.status);
-
-    // 5. Issue a new access token and refresh token.
-    return this.signTokens(user.id, user.role);
+    return {
+      accessToken: this.createAccessToken(
+        result.userId,
+        result.role,
+        result.sessionId,
+      ),
+      refreshToken: result.refreshToken,
+    };
   }
 
   /**
-   * @method logout
-   * @param refreshToken
-   * @returns
+   * Revokes the session associated with the supplied refresh credential.
+   *
+   * Logout remains best-effort so invalid or expired tokens do not prevent
+   * the controller from clearing the browser's refresh-token cookie.
    */
   public async logout(refreshToken: string) {
     try {
-      // Verify the refresh token before using its payload.
-      const payload = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET, {
-        algorithms: ["HS256"],
-      });
-
-      if (!isValidRefreshTokenPayload(payload)) {
-        logger.warn("Logout attempted with invalid refresh token payload");
-        return;
-      }
-
-      // Revoke this specific refresh-token session.
-      await redis.del(`refresh_token:${payload.id}:${refreshToken}`);
-    } catch (error: unknown) {
-      // Logout should remain best-effort.
-      // An expired or invalid token should not prevent cookie clearing.
-      logger.warn("Logout attempted with invalid refresh token", {
+      await sessionService.revokeRefreshToken(refreshToken, "user_logout");
+    } catch (error) {
+      logger.warn("Failed to revoke authentication session during logout", {
         error,
       });
     }
   }
 
   /**
-   * @method forgotPassword
-   * @param email
-   * @returns
+   * Starts the password-reset flow.
+   *
+   * The raw token is sent through the reset link. Only its SHA-256 digest
+   * is persisted in the authentication challenge table.
    */
   public async forgotPassword(email: string) {
     const [user] = await db
-      .select({ id: users.id, username: users.username })
+      .select({ id: users.id, username: users.username, email: users.email })
       .from(users)
       .where(eq(users.email, email))
       .limit(1);
@@ -441,15 +618,23 @@ class AuthService {
       return { message: "If that email exists, a reset link has been sent." };
     }
 
-    const resetToken = generateOTP(32);
+    // A 32-byte random token provides 256 bits of entropy.
+    // Only its SHA-256 digest is stored in the database.
+    const resetToken = randomBytes(32).toString("hex");
+    const secretHash = createPasswordResetTokenDigest(resetToken);
 
-    await redis.set(`password_reset:${resetToken}`, user.id, {
-      EX: RESET_TOKEN_EXPIRE_SEC,
+    await db.insert(authChallenges).values({
+      userId: user.id,
+      purpose: "password_reset",
+      targetEmail: user.email,
+      secretHash,
+      expiresAt: new Date(Date.now() + RESET_TOKEN_EXPIRE_SEC * 1000),
     });
 
     const resetUrl = `${env.CLIENT_URL}/auth/reset-password?token=${resetToken}`;
+
     await notificationService.sendPasswordResetEmail(
-      email,
+      user.email,
       user.username,
       resetUrl,
     );
@@ -458,101 +643,187 @@ class AuthService {
   }
 
   /**
-   * @method resetPassword
-   * @param token
-   * @param newPassword
+   * Resets the user's password and invalidates existing authentication
+   * sessions so previously issued credentials cannot remain active.
+   *
+   * Password updates, reset-challenge consumption, session revocation
+   * and security-event recording are committed in one transaction.
    */
   public async resetPassword(token: string, newPassword: string) {
-    const redisKey = `password_reset:${token}`;
+    const secretHash = createPasswordResetTokenDigest(token);
 
-    // 1. Read the token without consuming it yet.
-    const userId = await redis.get(redisKey);
+    // Hash before opening the transaction so the database row lock is not
+    // held during the relatively expensive password-hashing operation.
+    const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-    if (!userId) {
-      throw new AppError(
-        HTTP_STATUS.BAD_REQUEST,
-        "Invalid or expired password reset token",
+    const now = new Date();
+
+    const user = await db.transaction(async (tx) => {
+      // Lock the challenge row so concurrent reset requests cannot both
+      // consume the same challenge.
+      const [challenge] = await tx
+        .select({
+          id: authChallenges.id,
+          userId: authChallenges.userId,
+        })
+        .from(authChallenges)
+        .where(
+          and(
+            eq(authChallenges.secretHash, secretHash),
+            eq(authChallenges.purpose, "password_reset"),
+            isNull(authChallenges.consumedAt),
+            isNull(authChallenges.revokedAt),
+            gt(authChallenges.expiresAt, now),
+          ),
+        )
+        .for("update")
+        .limit(1);
+
+      if (!challenge?.userId) {
+        throw new AppError(
+          HTTP_STATUS.BAD_REQUEST,
+          "Invalid or expired password reset token",
+        );
+      }
+
+      const [account] = await tx
+        .select({
+          id: users.id,
+          username: users.username,
+          email: users.email,
+        })
+        .from(users)
+        .where(eq(users.id, challenge.userId))
+        .limit(1);
+
+      if (!account) {
+        throw new AppError(
+          HTTP_STATUS.BAD_REQUEST,
+          "Invalid or expired password reset token",
+        );
+      }
+
+      // Update the legacy password field and its identity record together.
+      await tx
+        .update(users)
+        .set({ passwordHash })
+        .where(eq(users.id, account.id));
+
+      const [passwordIdentity] = await tx
+        .update(authIdentities)
+        .set({
+          passwordHash,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(authIdentities.userId, account.id),
+            eq(authIdentities.provider, "password"),
+          ),
+        )
+        .returning({ id: authIdentities.id });
+
+      if (!passwordIdentity) {
+        await tx.insert(authIdentities).values({
+          userId: account.id,
+          provider: "password",
+          passwordHash,
+        });
+      }
+
+      // Consume the challenge as part of the same transaction.
+      await tx
+        .update(authChallenges)
+        .set({ consumedAt: now })
+        .where(eq(authChallenges.id, challenge.id));
+
+      // Revoke all active sessions and their refresh credentials atomically
+      // with the password update and reset-challenge consumption.
+      await sessionService.revokeAllUserSessionsInTransaction(
+        tx,
+        account.id,
+        now,
+        "password_reset",
       );
-    }
 
-    // 2. Verify that the associated user exists.
-    const [user] = await db
-      .select({
-        id: users.id,
-        username: users.username,
-        email: users.email,
-      })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    if (!user) {
-      // Remove an orphaned reset token.
-      await redis.del(redisKey);
-
-      throw new AppError(
-        HTTP_STATUS.BAD_REQUEST,
-        "Invalid or expired password reset token",
-      );
-    }
-
-    // 3. Hash the new password before consuming the token.
-    // Keep the cost factor consistent with the rest of AuthService.
-    const passwordHash = await bcrypt.hash(newPassword, 12);
-
-    // 4. Atomically consume the token.
-    // If another request has already consumed it, this returns null.
-    const consumedUserId = await redis.getDel(redisKey);
-
-    if (!consumedUserId || consumedUserId !== userId) {
-      throw new AppError(
-        HTTP_STATUS.BAD_REQUEST,
-        "Invalid or expired password reset token",
-      );
-    }
-
-    // 5. Update the password.
-    await db.update(users).set({ passwordHash }).where(eq(users.id, user.id));
-
-    // 6. Revoke all existing refresh-token sessions.
-    await this.revokeAllRefreshTokens(user.id);
-
-    try {
-      await notificationService.sendPasswordUpdateEmail(
-        user.email,
-        user.username,
-      );
-    } catch (error) {
-      logger.error("Failed to send password update email", {
-        userId: user.id,
-        error,
+      // Record the password-reset action even when the account had
+      // no active sessions to revoke. SecurityEventRepository also
+      // publishes the mandatory notification outbox event.
+      await securityEventRepository.create(tx, {
+        userId: account.id,
+        sessionId: null,
+        eventType: SECURITY_EVENT_TYPES.PASSWORD_RESET,
+        outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+        reason: "password_reset_completed",
+        metadata: {},
+        occurredAt: now,
       });
-    }
-  }
 
-  private async signTokens(userId: string, role: string) {
-    const accessExpiry = ACCESS_TOKEN_EXPIRE as jwt.SignOptions["expiresIn"];
-    const refreshExpiry = REFRESH_TOKEN_EXPIRE as jwt.SignOptions["expiresIn"];
-
-    const accessToken = jwt.sign({ id: userId, role }, env.JWT_ACCESS_SECRET, {
-      expiresIn: accessExpiry,
-      algorithm: "HS256",
+      return account;
     });
 
-    const refreshToken = jwt.sign(
-      { id: userId, role },
-      env.JWT_REFRESH_SECRET,
+    // Clean up legacy Redis refresh-token keys after the database transaction
+    // commits. This is compatibility cleanup for the previous token system.
+    await this.clearLegacyRefreshTokens(user.id);
+
+    // The password-reset security alert and its email delivery are now
+    // handled by the transactional notification pipeline.
+  }
+
+  /**
+   * Creates a durable session and returns its initial opaque refresh token
+   * together with a session-bound access token.
+   *
+   * An optional authentication event is persisted atomically with session
+   * creation, initial refresh-token persistence and session.created.
+   */
+  private async signTokens(
+    userId: string,
+    role: string,
+    authMethods: string[],
+    context: Partial<AuthSessionContext> = {},
+    securityEvent?: SessionCreationSecurityEvent,
+  ) {
+    const { session, refreshToken } = await sessionService.createSession({
+      userId,
+      clientType: context.clientType ?? "web",
+      authMethods,
+      platform: context.platform,
+      deviceLabel: context.deviceLabel,
+      userAgentSummary: context.userAgentSummary,
+      ipAddress: context.ipAddress,
+      securityEvent,
+    });
+
+    return {
+      accessToken: this.createAccessToken(userId, role, session.id),
+      refreshToken,
+    };
+  }
+
+  /**
+   * Creates a short-lived access JWT bound to one durable authentication
+   * session. The middleware validates that session on authenticated requests.
+   */
+  private createAccessToken(
+    userId: string,
+    role: string,
+    sessionId: string,
+  ): string {
+    const accessExpiry = ACCESS_TOKEN_EXPIRE as jwt.SignOptions["expiresIn"];
+
+    return jwt.sign(
       {
-        expiresIn: refreshExpiry,
+        id: userId,
+        role,
+        sid: sessionId,
+      },
+      env.JWT_ACCESS_SECRET,
+      {
+        expiresIn: accessExpiry,
         algorithm: "HS256",
       },
     );
-
-    await redis.set(`refresh_token:${userId}:${refreshToken}`, "valid", {
-      EX: REFRESH_TOKEN_EXPIRE_SEC,
-    });
-
-    return { accessToken, refreshToken };
   }
 
   private ensureAccountIsActive(status: User["status"]): void {
@@ -568,13 +839,39 @@ class AuthService {
     }
   }
 
-  public async revokeAllRefreshTokens(userId: string): Promise<void> {
-    for await (const key of redis.scanIterator({
+  /**
+   * Removes legacy JWT refresh-token keys created before the
+   * database-backed session migration.
+   *
+   * Redis scanIterator yields batches of matching keys. Empty batches
+   * must be skipped because Redis DEL requires at least one key.
+   */
+  private async clearLegacyRefreshTokens(userId: string): Promise<void> {
+    for await (const keys of redis.scanIterator({
       MATCH: `refresh_token:${userId}:*`,
       COUNT: 100,
     })) {
-      await redis.del(key);
+      // SCAN may return an empty batch when no matching keys exist.
+      if (keys.length === 0) {
+        continue;
+      }
+
+      // Delete the matching keys in one Redis command.
+      await redis.del(keys);
     }
+  }
+
+  /**
+   * Revokes every durable session belonging to a user and cleans up
+   * refresh-token records from the previous authentication implementation.
+   */
+  public async revokeAllRefreshTokens(userId: string): Promise<void> {
+    await sessionService.revokeAllUserSessions(
+      userId,
+      "account_wide_revocation",
+    );
+
+    await this.clearLegacyRefreshTokens(userId);
   }
 }
 

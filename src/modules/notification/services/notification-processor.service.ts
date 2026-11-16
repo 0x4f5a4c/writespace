@@ -2,11 +2,8 @@ import { ZodError, z } from "zod";
 
 import { db, type DatabaseTransaction } from "../../../db";
 
-import type { OutboxEvent } from "../../../db/schema/outbox-events";
-import type {
-  NewNotification,
-  Notification,
-} from "../../../db/schema/notifications";
+import type { OutboxEvent } from "@db/schema/outbox-events";
+import type { NewNotification, Notification } from "@db/schema/notifications";
 
 import { HTTP_STATUS } from "@shared/constants/http-codes";
 import { AppError } from "@shared/utils/app.error";
@@ -33,6 +30,7 @@ import {
   parseEventPayload,
   type EventPayloadMap,
 } from "../events/event.registry";
+import type { AuthSecurityEventType } from "../events/auth-security-event.types";
 
 import {
   notificationGroupRepository,
@@ -76,6 +74,47 @@ interface InboxNotificationInput {
 }
 
 /**
+ * Safe user-facing copy for authentication security events.
+ *
+ * The notification consumer uses this allowlisted mapping rather than
+ * displaying arbitrary reason strings or security-event metadata.
+ */
+const SECURITY_ALERT_PRESENTATION: Record<
+  AuthSecurityEventType,
+  { title: string; body: string }
+> = {
+  "auth.login": {
+    title: "New sign-in to your account",
+    body: "A password sign-in to your Writespace account was completed. If you don't recognize this activity, review your active sessions and change your password.",
+  },
+
+  "auth.oauth_login": {
+    title: "New external-provider sign-in",
+    body: "Your Writespace account was accessed using a linked external sign-in provider. If you don't recognize this activity, review your active sessions and secure your account.",
+  },
+
+  "password.reset": {
+    title: "Your password was reset",
+    body: "The password for your Writespace account was reset. If you didn't request this change, secure your account and review your active sessions.",
+  },
+
+  "password.changed": {
+    title: "Your password was changed",
+    body: "The password for your Writespace account was changed. If you didn't make this change, reset your password and review your active sessions.",
+  },
+
+  "account.suspended": {
+    title: "Your account was suspended",
+    body: "Your Writespace account has been suspended. If you believe this action was taken in error, contact Writespace support.",
+  },
+
+  "refresh_token.reuse_detected": {
+    title: "Suspicious session activity detected",
+    body: "A previously used refresh credential was presented again. The affected session has been revoked as a precaution. Review your account security if you don't recognize this activity.",
+  },
+};
+
+/**
  * Converts supported domain events into durable inbox notifications.
  *
  * Event-specific category and priority are resolved through the
@@ -85,6 +124,66 @@ interface InboxNotificationInput {
  * updates, is handled by separate delivery components.
  */
 export class NotificationProcessorService {
+  /**
+   * Creates a durable channel delivery and its outbox request together.
+   *
+   * The delivery worker receives only the delivery ID and reloads the
+   * persisted notification and delivery context from PostgreSQL.
+   */
+  private async createDeliveryRequest(
+    transaction: DatabaseTransaction,
+    event: OutboxEvent,
+    notification: Notification,
+    groupId: string | null,
+    channel: "realtime" | "email",
+    reasonCode: string,
+    templateVersion?: string,
+  ): Promise<void> {
+    const delivery = await notificationDeliveryRepository.create(transaction, {
+      notificationId: notification.id,
+      groupId,
+      recipientUserId: notification.recipientUserId,
+      sourceEventId: event.id,
+
+      channel,
+
+      idempotencyKey: `${channel}:${event.id}:${notification.id}`,
+
+      policyVersion: NOTIFICATION_POLICY_VERSION,
+      eligibilityDecision: "eligible",
+      reasonCode,
+      preferenceEvaluatedAt: new Date(),
+
+      ...(templateVersion ? { templateVersion } : {}),
+    });
+
+    await outboxRepository.create(transaction, {
+      eventName: NOTIFICATION_DELIVERY_REQUESTED_EVENT,
+      eventVersion: 1,
+      producer: "notification-processor",
+
+      aggregateType: "notification_delivery",
+      aggregateId: delivery.id,
+
+      actorId: event.actorId,
+
+      payload: {
+        deliveryId: delivery.id,
+      },
+
+      metadata: {
+        sourceEventId: event.id,
+        notificationId: notification.id,
+        channel,
+        templateVersion: templateVersion ?? null,
+      },
+
+      correlationId: event.correlationId,
+      causationId: event.id,
+      occurredAt: event.occurredAt,
+    });
+  }
+
   /**
    * Process one event identified by its durable outbox ID.
    *
@@ -225,58 +324,42 @@ export class NotificationProcessorService {
       }
 
       /*
-       * Create the realtime delivery only when an eligible inbox notification
-       * was actually created or updated.
+       * Create channel deliveries from the persisted notification.
        *
-       * The delivery row and its outbox request are part of the same transaction
-       * as the notification and processed-event outcome.
+       * Realtime uses the existing Socket.IO handler.
+       * Email is created only when the event's central policy enables it.
+       *
+       * The delivery records and their delivery-request outbox events
+       * participate in the current notification-processing transaction.
        */
       if (notificationForDelivery) {
-        const delivery = await notificationDeliveryRepository.create(
+        await this.createDeliveryRequest(
           transaction,
-          {
-            notificationId: notificationForDelivery.id,
-            groupId: notificationGroupId,
-            recipientUserId: notificationForDelivery.recipientUserId,
-            sourceEventId: event.id,
-
-            channel: "realtime",
-
-            // Each source event gets one logical delivery per notification.
-            idempotencyKey: `realtime:${event.id}:${notificationForDelivery.id}`,
-
-            policyVersion: NOTIFICATION_POLICY_VERSION,
-            eligibilityDecision: "eligible",
-            reasonCode: "in_app_preference_enabled",
-            preferenceEvaluatedAt: new Date(),
-          },
+          event,
+          notificationForDelivery,
+          notificationGroupId,
+          "realtime",
+          "in_app_preference_enabled",
         );
 
-        // The worker receives only the delivery ID and reloads durable data.
-        await outboxRepository.create(transaction, {
-          eventName: NOTIFICATION_DELIVERY_REQUESTED_EVENT,
-          eventVersion: 1,
-          producer: "notification-processor",
+        const eventPolicy = getNotificationPolicy(event.eventName);
+        const emailPolicy = eventPolicy?.channels.email;
 
-          aggregateType: "notification_delivery",
-          aggregateId: delivery.id,
-
-          actorId: event.actorId,
-
-          payload: {
-            deliveryId: delivery.id,
-          },
-
-          metadata: {
-            sourceEventId: event.id,
-            notificationId: notificationForDelivery.id,
-            channel: "realtime",
-          },
-
-          correlationId: event.correlationId,
-          causationId: event.id,
-          occurredAt: event.occurredAt,
-        });
+        if (
+          emailPolicy?.permitted &&
+          emailPolicy.available &&
+          emailPolicy.enabledByDefault
+        ) {
+          await this.createDeliveryRequest(
+            transaction,
+            event,
+            notificationForDelivery,
+            notificationGroupId,
+            "email",
+            "mandatory_security_alert",
+            "auth-security-alert-v1",
+          );
+        }
       }
 
       // The notification, delivery, outbox request and terminal outcome
@@ -759,6 +842,32 @@ export class NotificationProcessorService {
           resourceType: "content_item",
           resourceId: payload.contentItemId,
           actionType: "open_resource",
+        });
+      }
+
+      case "auth.security_alert": {
+        const payload = this.parsePayload(
+          "auth.security_alert",
+          event.eventVersion,
+          event.payload,
+        );
+
+        const presentation =
+          SECURITY_ALERT_PRESENTATION[payload.securityEventType];
+
+        return this.createInboxNotification(event, {
+          recipientUserId: payload.recipientUserId,
+          actorUserId: payload.recipientUserId,
+          notificationType: "SECURITY_ALERT",
+          title: presentation.title,
+          body: presentation.body,
+          presentationData: {
+            securityEventId: payload.securityEventId,
+            securityEventType: payload.securityEventType,
+          },
+          resourceType: "security_event",
+          resourceId: payload.securityEventId,
+          actionType: "open_security_settings",
         });
       }
 

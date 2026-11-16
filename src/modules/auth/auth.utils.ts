@@ -7,6 +7,7 @@ import {
   Strategy as GitHubStrategy,
   Profile as GitHubProfile,
 } from "passport-github2";
+import { RedisOAuthStateStore } from "./oauth-state.store";
 import env from "../../config/env";
 import { randomInt } from "crypto";
 
@@ -36,6 +37,7 @@ export const configurePassport = () => {
           clientID: env.GOOGLE_CLIENT_ID,
           clientSecret: env.GOOGLE_CLIENT_SECRET,
           callbackURL: `${env.SERVER_URL}/auth/google/callback`,
+          store: new RedisOAuthStateStore("google"),
         },
         (
           _accessToken: string,
@@ -59,6 +61,7 @@ export const configurePassport = () => {
           clientSecret: env.GITHUB_CLIENT_SECRET,
           callbackURL: `${env.SERVER_URL}/auth/github/callback`,
           scope: ["user:email"],
+          store: new RedisOAuthStateStore("github"),
         },
         (
           _accessToken: string,
