@@ -5,6 +5,7 @@ declare global {
     interface User {
       id: string;
       role?: string;
+      sessionId?: string;
       emails?: Array<{ value: string }>;
       displayName?: string;
       photos?: Array<{ value: string }>;
