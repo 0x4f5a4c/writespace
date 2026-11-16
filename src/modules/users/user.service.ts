@@ -2,6 +2,7 @@ import { eq, and, ilike, or } from "drizzle-orm";
 import { db } from "../../db";
 import { users, type User } from "../../db/schema/users";
 import { follows } from "../../db/schema/follows";
+import { authIdentities } from "../../db/schema/auth-identities";
 import bcrypt from "bcryptjs";
 import { authService } from "../auth/auth.service";
 import type { UpdatePasswordInput } from "./dtos/update-password.dto";
@@ -9,6 +10,13 @@ import { AppError } from "@shared/utils/app.error";
 import { HTTP_STATUS } from "@shared/constants/http-codes";
 import type { UpdateProfileDto } from "./dtos/update-profile.dto";
 import type { PublicUser, PublicProfile } from "./interface/user.interface";
+
+import { sessionService } from "../sessions/session.service";
+import {
+  securityEventRepository,
+  SECURITY_EVENT_OUTCOMES,
+  SECURITY_EVENT_TYPES,
+} from "../sessions/security-event.repository";
 
 const SALT_ROUNDS = 12;
 
@@ -262,10 +270,15 @@ export class UserService {
    * Changes the password of an authenticated user.
    *
    * The user must provide the current password before a new password
-   * can be saved. Existing refresh-token sessions are revoked afterward.
+   * can be saved. Other sessions are revoked while the current session
+   * remains active.
+   *
+   * Password updates, session revocation and security events are
+   * committed in one transaction.
    */
   public static async updatePassword(
     userId: string,
+    currentSessionId: string,
     data: UpdatePasswordInput,
   ): Promise<{ message: string }> {
     const [user] = await db
@@ -299,50 +312,148 @@ export class UserService {
     }
 
     const newPasswordHash = await bcrypt.hash(data.newPassword, SALT_ROUNDS);
+    const now = new Date();
 
-    await db
-      .update(users)
-      .set({ passwordHash: newPasswordHash })
-      .where(eq(users.id, userId));
+    await db.transaction(async (tx) => {
+      // Lock the account and check that its password was not changed
+      // by another request after the current-password verification.
+      const [lockedUser] = await tx
+        .select({
+          id: users.id,
+          passwordHash: users.passwordHash,
+        })
+        .from(users)
+        .where(eq(users.id, userId))
+        .for("update");
 
-    // Revoke existing refresh-token sessions after the password changes.
-    await authService.revokeAllRefreshTokens(userId);
+      if (!lockedUser || lockedUser.passwordHash !== user.passwordHash) {
+        throw new AppError(
+          HTTP_STATUS.CONFLICT,
+          "Your password has changed. Please try again.",
+        );
+      }
 
-    // Email notification is best-effort.
-    // A queue failure must not make a successful password change appear to fail.
-    try {
-      await notificationService.sendPasswordUpdateEmail(
-        user.email,
-        user.username,
-      );
-    } catch (error) {
-      console.error("Failed to send password update email:", {
+      // Keep the legacy user record and password identity synchronized.
+      await tx
+        .update(users)
+        .set({ passwordHash: newPasswordHash })
+        .where(eq(users.id, userId));
+
+      const [passwordIdentity] = await tx
+        .update(authIdentities)
+        .set({
+          passwordHash: newPasswordHash,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(authIdentities.userId, userId),
+            eq(authIdentities.provider, "password"),
+          ),
+        )
+        .returning({ id: authIdentities.id });
+
+      // Support transitional accounts without a password identity record.
+      if (!passwordIdentity) {
+        await tx.insert(authIdentities).values({
+          userId,
+          provider: "password",
+          passwordHash: newPasswordHash,
+        });
+      }
+
+      // Revoke every other session and its refresh credentials.
+      // The authenticated current session remains active.
+      await sessionService.revokeOtherUserSessionsInTransaction(
+        tx,
         userId,
-        error,
-      });
-    }
+        currentSessionId,
+        now,
+        "password_changed",
+      );
 
-    return { message: "Password updated successfully" };
+      // Record the password change atomically with the update.
+      // This also creates the mandatory security notification outbox event.
+      await securityEventRepository.create(tx, {
+        userId,
+        sessionId: currentSessionId,
+        eventType: SECURITY_EVENT_TYPES.PASSWORD_CHANGED,
+        outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+        reason: "authenticated_password_change",
+        metadata: {},
+        occurredAt: now,
+      });
+    });
+
+    // The password-changed security alert and email are now handled
+    // by the transactional notification pipeline.
+
+    return {
+      message:
+        "Password updated successfully. Other sessions have been signed out.",
+    };
   }
 
+  /**
+   * Suspends an account and revokes all associated authentication sessions.
+   *
+   * The account status change, session revocation and security audit event
+   * are committed in one database transaction.
+   */
   public static async deleteUser(userId: string): Promise<void> {
-    const [user] = await db
-      .update(users)
-      .set({ status: "suspended" })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id });
+    const now = new Date();
 
-    if (!user) {
-      throw new AppError(HTTP_STATUS.NOT_FOUND, "User not found");
-    }
+    await db.transaction(async (tx) => {
+      // Lock the account before changing its status or revoking its sessions.
+      const [account] = await tx
+        .select({
+          id: users.id,
+          status: users.status,
+        })
+        .from(users)
+        .where(eq(users.id, userId))
+        .for("update");
 
-    // A suspended account must not retain usable refresh-token sessions.
+      if (!account) {
+        throw new AppError(HTTP_STATUS.NOT_FOUND, "User not found");
+      }
+
+      const isNewSuspension = account.status !== "suspended";
+
+      await tx
+        .update(users)
+        .set({ status: "suspended" })
+        .where(eq(users.id, userId));
+
+      // Revoke all sessions and refresh credentials in this transaction.
+      await sessionService.revokeAllUserSessionsInTransaction(
+        tx,
+        userId,
+        now,
+        "account_suspended",
+      );
+
+      // Avoid duplicate account-suspension events for repeated requests.
+      if (isNewSuspension) {
+        await securityEventRepository.create(tx, {
+          userId,
+          sessionId: null,
+          eventType: SECURITY_EVENT_TYPES.ACCOUNT_SUSPENDED,
+          outcome: SECURITY_EVENT_OUTCOMES.SUCCESS,
+          reason: "account_suspended",
+          metadata: {},
+          occurredAt: now,
+        });
+      }
+    });
+
+    // Preserve cleanup of refresh-token keys from the previous Redis-based
+    // authentication implementation. Database revocation has already
+    // completed atomically above.
     try {
       await authService.revokeAllRefreshTokens(userId);
     } catch (error) {
-      // The account suspension is already persisted.
-      // Refresh-token rotation also independently checks account status.
-      console.error("Failed to revoke refresh tokens for suspended user:", {
+      console.error("Failed to clean up legacy refresh tokens:", {
         userId,
         error,
       });
