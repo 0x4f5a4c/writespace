@@ -12,6 +12,7 @@ import { HTTP_STATUS } from "@shared/constants/http-codes";
 import { AppError } from "@shared/utils/app.error";
 
 import type { NotificationInboxService } from "../services/notification-inbox.service";
+import { sessionService } from "@modules/sessions/session.service";
 
 type AuthenticatedSocketUser = IJwtPayload & {
   role: "user" | "admin";
@@ -90,6 +91,8 @@ function isValidSocketJwtPayload(
   return (
     typeof data.id === "string" &&
     UUID_REGEX.test(data.id) &&
+    typeof data.sid === "string" &&
+    UUID_REGEX.test(data.sid) &&
     (data.role === "user" || data.role === "admin")
   );
 }
@@ -134,47 +137,78 @@ export function initializeNotificationSocketServer(
     },
   });
 
-  // Reject unauthenticated or invalid connections before accepting them.
-  io.use((socket, next) => {
-    const token = getHandshakeAccessToken(socket.handshake.auth as unknown);
-
-    if (!token) {
-      return next(
-        new AppError(
-          HTTP_STATUS.UNAUTHORIZED,
-          "No token provided, authorization denied.",
-        ),
-      );
-    }
-
-    let decoded: string | jwt.JwtPayload;
-
+  // Reject unauthenticated, invalid, or revoked sessions before
+  // accepting a WebSocket connection.
+  io.use(async (socket, next) => {
     try {
-      decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
-        algorithms: ["HS256"],
+      const token = getHandshakeAccessToken(socket.handshake.auth as unknown);
+
+      if (!token) {
+        return next(
+          new AppError(
+            HTTP_STATUS.UNAUTHORIZED,
+            "No token provided, authorization denied.",
+          ),
+        );
+      }
+
+      let decoded: string | jwt.JwtPayload;
+
+      try {
+        decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
+          algorithms: ["HS256"],
+        });
+      } catch {
+        return next(
+          new AppError(
+            HTTP_STATUS.UNAUTHORIZED,
+            "Invalid or expired access token.",
+          ),
+        );
+      }
+
+      if (!isValidSocketJwtPayload(decoded)) {
+        return next(
+          new AppError(
+            HTTP_STATUS.UNAUTHORIZED,
+            "Invalid access token payload.",
+          ),
+        );
+      }
+
+      // Verify that the session associated with this access token
+      // is still active and belongs to the authenticated account.
+      const sessionIsValid = await sessionService.isSessionValidForAccess(
+        decoded.sid,
+        decoded.id,
+      );
+
+      if (!sessionIsValid) {
+        return next(
+          new AppError(HTTP_STATUS.UNAUTHORIZED, "Session expired or revoked."),
+        );
+      }
+
+      // Store only the verified identity and session ID,
+      // never the access token itself.
+      socket.data.authenticatedUser = {
+        id: decoded.id,
+        role: decoded.role,
+        sid: decoded.sid,
+      };
+
+      return next();
+    } catch (error) {
+      logger.error("Notification socket authentication failed", {
+        error: error instanceof Error ? error.message : String(error),
       });
-    } catch {
+
       return next(
-        new AppError(
-          HTTP_STATUS.UNAUTHORIZED,
-          "Invalid or expired access token.",
-        ),
+        error instanceof Error
+          ? error
+          : new Error("Notification socket authentication failed"),
       );
     }
-
-    if (!isValidSocketJwtPayload(decoded)) {
-      return next(
-        new AppError(HTTP_STATUS.UNAUTHORIZED, "Invalid access token payload."),
-      );
-    }
-
-    // Store only the verified identity, never the access token.
-    socket.data.authenticatedUser = {
-      id: decoded.id,
-      role: decoded.role,
-    };
-
-    next();
   });
 
   io.on("connection", (socket) => {
