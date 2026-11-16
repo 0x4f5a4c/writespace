@@ -12,7 +12,9 @@ export const resetPasswordSchema = z.object({
   body: z.object({
     // Reset tokens are generated using generateOTP(32),
     // so they must contain exactly 32 numeric characters.
-    token: z.string().regex(/^\d{32}$/, "Invalid or expired reset token"),
+    token: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/i, "Invalid or expired reset token"),
 
     password: z
       .string()
