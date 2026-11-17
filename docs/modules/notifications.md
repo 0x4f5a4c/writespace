@@ -123,6 +123,6 @@ All 7 HTML/text email templates in `src/modules/notification/templates/` share `
 - [ADR-0004: Decoupled Notification Inbox, Grouping & Channel Deliveries](../decisions/ADR-0004-decoupled-notification-architecture.md)
 - [ADR-0005: Dual-Lease Notification Delivery & Queue Reconciliation](../decisions/ADR-0005-dual-lease-delivery-reconciliation.md)
 - [Realtime Socket.IO Contract](../api/realtime-events.md)
-- [Notification & Preference Endpoints](../api/endpoints/notification.md)
+- [Notification & Preference Endpoints](../api/endpoints/notifications.md)
 
 _Last verified against: v1.0.0 (b97c4fa, documentation branch, 2026-11-17)_
