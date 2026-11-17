@@ -8,7 +8,7 @@ const envSchema = z
     NODE_ENV: z
       .enum(["development", "production", "test"])
       .default("development"),
-    PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    PORT: z.coerce.number().int().min(1).max(65535).default(8000),
 
     // PostgreSQL
 
@@ -370,8 +370,8 @@ const envSchema = z
       .prefault("false"),
 
     AI_PROVIDER: z.enum(["gemini", "mock"]).default("gemini"),
-    AI_MODEL: z.string().min(1, "AI model name is required"),
-    GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
+    AI_MODEL: z.string().optional(),
+    GEMINI_API_KEY: z.string().optional(),
     AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1000),
     AI_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
     AI_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
@@ -390,7 +390,24 @@ const envSchema = z
         "OUTBOX_DISPATCHER_BACKOFF_MAX_MS cannot be smaller than OUTBOX_DISPATCHER_BACKOFF_BASE_MS",
       path: ["OUTBOX_DISPATCHER_BACKOFF_MAX_MS"],
     },
-  );
+  )
+  .superRefine((data, ctx) => {
+    if (!data.AI_ENABLED) return;
+    if (!data.AI_MODEL) {
+      ctx.addIssue({
+        code: "custom",
+        message: "AI_MODEL is required when AI_ENABLED=true",
+        path: ["AI_MODEL"],
+      });
+    }
+    if (!data.GEMINI_API_KEY) {
+      ctx.addIssue({
+        code: "custom",
+        message: "GEMINI_API_KEY is required when AI_ENABLED=true",
+        path: ["GEMINI_API_KEY"],
+      });
+    }
+  });
 
 const _env = envSchema.safeParse(process.env);
 
