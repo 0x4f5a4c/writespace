@@ -1,8 +1,6 @@
-FILE: architecture/data-flow.md
-
 ---
-
-## description: End-to-end sequence diagrams tracing content creation with media rollback cleanup, outbox-driven notification delivery, and refresh token rotation.
+description: End-to-end sequence diagrams tracing content creation with media rollback cleanup, outbox-driven notification delivery, and refresh token rotation.
+---
 
 # Request & Event Data Flow
 
