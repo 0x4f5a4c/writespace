@@ -22,7 +22,7 @@ export class GeminiProvider implements AIProvider {
   ): Promise<AITextGenerationResponse> {
     logger.debug(`[AI] Calling Gemini model=${env.AI_MODEL}`);
     const response = await this.client.models.generateContent({
-      model: env.AI_MODEL,
+      model: env.AI_MODEL as string,
       contents: request.prompt,
       config: {
         systemInstruction: request.systemInstruction,
