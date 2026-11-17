@@ -108,6 +108,6 @@ writespace-backend/
 - [Module Ownership Map](module-map.md)
 - [Entry Points & Server Lifecycle](entry-points.md)
 - [Engineering Conventions](conventions.md)
-- Configuration Files
+- [Configuration Files](../references/config-files.md)
 
 _Last verified against: v1.0.0 (b97c4fa, documentation branch, 2026-11-17)_
