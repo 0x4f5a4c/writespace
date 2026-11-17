@@ -1,0 +1,11 @@
+$schema: https://api.gitbook.com/gitbook-docs.yaml
+site:
+  title: writespace Docs
+  structure:
+    - type: space
+      key: writespace-docs
+      title: Documentation
+      path: docs
+      default: true
+      content:
+        directory: ./docs
