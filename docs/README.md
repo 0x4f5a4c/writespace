@@ -1,194 +1,87 @@
-<div align="center">
-  <img
-    src="assets/logo.png"
-    width="100%"
-    alt="Writespace — Social Blogging Platform"
-  />
-</div>
+---
+description: Canonical engineering documentation for the Writespace backend platform, covering architecture, domain models, first-party APIs, and operations.
+---
 
-<br/>
+# Writespace Engineering Documentation
 
-# Writespace Documentation
+> **Purpose:** Orient developers, first-party client integrators, and operators to the Writespace backend codebase, architecture, and operational workflows.
+> **Audience:** 1) Internal backend developers, 2) First-party web/native client developers, 3) Operations maintainers.
+> **Prerequisites:** None. Start with [5-Minute Quickstart](getting-started/quickstart.md) to boot the stack locally.
 
-Welcome to the technical documentation for **Writespace**.
+## Overview
 
-This directory contains the engineering documentation for the Writespace backend, including its architecture, database design, application modules, and operational infrastructure.
+Writespace (`writespace-backend` `v1.0.0`) is a social blogging backend designed for developers, technical students, and software engineering communities. It combines short-form social updates (**Posts**) and long-form technical publishing (**Articles**) on top of a unified relational identity (`content_items`). Because both content types share a common primary key in `content_items`, social interactions — threaded comments, seven reaction types, bookmarks (`content_saves`), shares, and user `@mentions` — operate through one consistent persistence and event pipeline.
 
-The purpose of this documentation is to explain how the system works, why certain architectural decisions were made, and how different components interact with each other.
+The backend is implemented in TypeScript on Node.js 24 using Express 5, Socket.IO, Drizzle ORM over PostgreSQL, and BullMQ over Redis. Domain state changes and asynchronous notification triggers are coordinated through a PostgreSQL transactional outbox (`outbox_events`), ensuring that in-app notifications, real-time WebSocket events, and transactional emails never drift out of sync with committed database state.
 
-## Documentation Structure
+## System at a glance
 
-The documentation is organized into four main sections.
+**Diagram: High-Level System Overview**
 
-```text
-docs/
-│
-├── README.md
-│
-├── assets/
-│   ├── banners/
-│   └── diagrams/
-│
-├── architecture/
-│   ├── overview.md
-│   └── content-model.md
-│
-├── database/
-│   ├── schema.md
-│   └── migrations.md
-│
-├── modules/
-│   ├── posts-and-articles.md
-│   ├── interactions.md
-│   ├── authentication-and-users.md
-│   └── notifications.md
-│
-└── operations/
-    ├── local-development.md
-    └── background-jobs.md
+```mermaid
+flowchart LR
+  Client["Writespace Client (Web / Native)"]
+  API["Express 5 + Socket.IO Server (src/server.ts)"]
+  PG[("PostgreSQL 18 (Drizzle ORM)")]
+  Redis[("Redis 7 (BullMQ + Rate Limits)")]
+  Workers["Background Workers (Outbox, Delivery, Email, Media)"]
+  External["External Services (Cloudinary, SMTP, OAuth)"]
+
+  Client -->|"REST /api/v1 + WebSocket"| API
+  API -->|"Transactions + Outbox"| PG
+  API -->|"Rate Limits + OAuth State + Queues"| Redis
+  Workers -->|"Poll Leases & Persist State"| PG
+  Workers <-->|"BullMQ Jobs"| Redis
+  Workers -->|"Uploads / SMTP"| External
+  API -->|"OAuth2 + Streaming Upload"| External
 ```
 
-## 1. Architecture
+## How to navigate this documentation
 
-This section explains the high-level system design and the relationships between major components.
+Choose a path based on your role and immediate task:
 
-| Document                                          | Description                                                                                    |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [Architecture Overview](architecture/overview.md) | High-level backend architecture, module responsibilities, and request processing.              |
-| [Content Model](architecture/content-model.md)    | Shared content identity and the relationship between Posts, Articles, and common interactions. |
+| Section                    | Primary Audience    | What You Will Find                                                                                                  | Start Here                                                        |
+| :------------------------- | :------------------ | :------------------------------------------------------------------------------------------------------------------ | :---------------------------------------------------------------- |
+| **Getting Started**        | New Internal Devs   | Tooling prerequisites, Docker vs. native Node.js setup, seeding, and a guided code tour.                            | [5-Minute Quickstart](getting-started/quickstart.md)              |
+| **Core Concepts**          | All Engineers       | Mental model of the shared `content_items` identity, `ContentDocument` JSONB blocks, and domain glossary.           | [System Mental Model](concepts/overview.md)                       |
+| **Architecture**           | Internal Devs       | C4 context/container/component diagrams, request & outbox data flows, and technology choices.                       | [Architecture Overview](architecture/overview.md)                 |
+| **Codebase Guide**         | Internal Devs       | Annotated folder tree, module boundaries, `src/server.ts` lifecycle, and layering conventions.                      | [Repository Structure](codebase/repository-structure.md)          |
+| **Application Modules**    | Internal Devs       | Deep-dives into auth, sessions, users, posts, articles, interactions, notification, and media handling.             | [Posts & Articles](modules/content.md)                            |
+| **Data & Storage**         | Internal Devs & Ops | All 28 PostgreSQL tables, Drizzle migrations (`DATABASE_DIRECT_URL`), deterministic UUID v5 seeding, and PII rules. | [Database Schema Reference](data/schema.md)                       |
+| **First-Party API**        | Client Integrators  | First-party REST contracts (`/api/v1/*`), cookie/bearer token flows, error envelopes, and Socket.IO events.         | [API Overview](api/overview.md)                                   |
+| **Backend Infrastructure** | Internal Devs       | Row-locking rules, BullMQ queues, outbox dispatcher, delivery reconciliation, and Redis key namespaces.             | [Background Jobs & Queues](backend/background-jobs-and-queues.md) |
+| **Security**               | Internal Devs & Ops | Threat model, SHA-256/HMAC/bcrypt credential hashing, CSRF origin enforcement, and rate limiters.                   | [Threat Model](security/threat-model.md)                          |
+| **Operations (Path A)**    | Operations          | Single-VM Oracle Cloud Ampere A1 deployment plan, memory budgets, backups, and incident runbooks.                   | [Environments](operations/environments.md)                        |
+| **Architecture Decisions** | All Engineers       | 10 evidence-backed ADRs explaining why key database, auth, outbox, and deployment choices were made.                | [ADR Index](decisions/README.md)                                  |
+| **Reference**              | All Engineers       | Complete environment variable table, CLI scripts, config files, dependencies, and v1 roadmap.                       | [Environment Variables](reference/env-vars.md)                    |
 
-Start here when you want to understand the overall structure of Writespace before exploring individual modules.
+## Core architectural pillars
 
-## 2. Database
+- **Shared Content Identity (`content_items`):** Every Post (`posts.id`) and Article (`articles.id`) uses a 1:1 foreign-key primary key referencing `content_items.id` (see `src/db/schema/content-items.ts`, `src/db/schema/posts.ts`, and `src/db/schema/articles.ts`). Comments, reactions, saves, shares, and mentions reference `content_items.id` directly.
 
-This section documents the database structure and schema management approach.
+- **Server-Managed Sessions & Refresh Token Rotation:** Access tokens are short-lived HS256 JWTs (`JWT_ACCESS_EXPIRE`, default `15m`) bound to a database session ID (`sid`) verified on every request via `sessionService.isSessionValidForAccess` (`src/shared/middlewares/auth.middleware.ts`). Opaque refresh tokens are hashed with SHA-256 (`refresh_tokens.token_hash`), rotated on every use, and trigger full session revocation if token reuse is detected (`src/modules/sessions/refresh-token.repository.ts`).
 
-| Document                                      | Description                                                                                     |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| [Database Schema](database/schema.md)         | Database tables, relationships, constraints, indexes, and schema organization.                  |
-| [Database Migrations](database/migrations.md) | Drizzle configuration, migration generation, database synchronization, and migration workflows. |
+- **Transactional Outbox & Dual-Lease Delivery:** Domain mutations write events into `outbox_events` inside the same PostgreSQL transaction (`src/modules/notification/services/event-publisher.service.ts`). Background workers claim outbox rows and channel deliveries (`notification_deliveries`) using expiring database leases, while a reconciliation worker repairs lost or stalled BullMQ jobs (`src/modules/notification/services/notification-reconciliation.service.ts`).
 
-This section is useful when modifying database structures, introducing new entities, or investigating data relationships.
+## Key decisions & rationale
 
-## 3. Modules
+- **First-party API boundary:** The `/api/v1` REST surface and Socket.IO server are engineered exclusively for the Writespace web and native client (`CLIENT_URL`) rather than public third-party developers, allowing tight coupling between frontend state needs and backend cursor/session contracts (see [API Overview & First-Party Scope](api/overview.md)).
 
-This section explains the responsibilities and internal organization of the major backend modules.
+- **Single-process modular monolith:** The HTTP server, Socket.IO server, and BullMQ workers initialize inside `src/server.ts`, simplifying local development and single-VM deployment (Path A) while preserving strict module boundaries under `src/modules/`.
 
-| Document                                                        | Description                                                                             |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| [Posts and Articles](modules/posts-and-articles.md)             | Content creation, lifecycle, media handling, queries, and preview metadata.             |
-| [Interactions](modules/interactions.md)                         | Reactions, comments, comment reactions, saves, shares, follows, and interaction events. |
-| [Authentication and Users](modules/authentication-and-users.md) | Authentication workflows, OTP verification, password management, and user operations.   |
-| [Notifications](modules/notifications.md)                       | Notification records, delivery tracking, and notification processing.                   |
+## Gotchas & edge cases
 
-Each module document focuses on its responsibilities and how it communicates with other parts of the application.
+- **Outbox pipeline is opt-in via environment configuration:** `OUTBOX_PROCESSING_ENABLED` defaults to `"false"` in `src/config/env.ts` until database migrations are applied. When `"false"`, domain services skip recording notification events and `src/server.ts` does not start the outbox dispatcher or notification workers.
 
-## 4. Operations
+- **Startup validation requires all mandatory secrets:** `src/config/env.ts` validates all required variables at boot — including `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `AUTH_CHALLENGE_SECRET` (64 hex chars), Cloudinary credentials, SMTP credentials, `AI_MODEL`, and `GEMINI_API_KEY` — and exits immediately with code `1` if any are missing.
 
-This section covers the infrastructure and workflows required to run and maintain the backend.
+## Related
 
-| Document                                             | Description                                                                            |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| [Local Development](operations/local-development.md) | Environment setup, dependencies, PostgreSQL, Redis, Docker, and application startup.   |
-| [Background Jobs](operations/background-jobs.md)     | BullMQ, Redis queues, workers, retries, failure handling, and asynchronous processing. |
-
-Use these documents when setting up a development environment or working with background infrastructure.
-
-## Documentation Assets
-
-The `assets/` directory contains visual resources used throughout the documentation.
-
-```text
-assets/
-│
-├── banners/
-│   └── Document-specific banners
-│
-└── diagrams/
-    └── Architecture and technical diagrams
-```
-
-### Banners
-
-Each major Markdown document should begin with a Writespace-branded banner related to its subject.
-
-Examples include:
-
-- Writespace Architecture
-- Writespace Content Model
-- Writespace Database Schema
-- Writespace Interactions
-- Writespace Notifications
-
-Banners provide visual consistency and help identify the purpose of each document.
-
-### Diagrams
-
-Diagrams are used to explain architecture, relationships, request flows, and background processing.
-
-Mermaid is preferred for technical diagrams because its source can be maintained alongside the documentation.
-
-SVG and PNG images can also be included when a visual representation is more useful than an embedded diagram.
-
-## Documentation Guidelines
-
-To keep the documentation useful and maintainable, follow these principles:
-
-**1. Document the actual implementation**
-
-Documentation should reflect the current repository. Avoid describing planned features as if they already exist.
-
-**2. Explain responsibilities**
-
-Focus on what a module does, why it exists, and how it communicates with other components.
-
-**3. Explain important design decisions**
-
-When a design decision affects architecture, data consistency, scalability, or security, document the reasoning behind it.
-
-**4. Use diagrams where they add value**
-
-Use diagrams to explain complex relationships and workflows. Avoid adding visuals that simply repeat information already explained in text.
-
-**5. Keep documentation organized**
-
-Store architecture documentation under `architecture/`, database documentation under `database/`, module documentation under `modules/`, and operational documentation under `operations/`.
-
-**6. Keep documentation updated**
-
-Whenever an implementation changes significantly, review the related documentation and update it accordingly.
-
-## Recommended Reading Order
-
-For someone new to the Writespace backend, the recommended reading order is:
-
-1. Architecture Overview
-2. Content Model
-3. Database Schema
-4. Database Migrations
-5. Posts and Articles
-6. Interactions
-7. Authentication and Users
-8. Notifications
-9. Local Development
-10. Background Jobs
-
-This order introduces the system architecture first, then explains the database and business modules before moving into operational concerns.
-
-## Contribution and Maintenance
-
-When introducing a new backend module or making a significant architectural change:
-
-1. Identify which existing document needs updating.
-2. Add a new document only when the subject deserves its own explanation.
-3. Place related images and diagrams in the appropriate assets directory.
-4. Update this README when adding or removing documentation files.
-5. Ensure that documented behavior matches the implementation.
-
-The goal is not to document every source file individually. It is to maintain a clear engineering reference that helps developers understand, operate, and extend Writespace.
+- [Prerequisites](getting-started/prerequisites.md)
+- [5-Minute Quickstart](getting-started/quickstart.md)
+- [System Mental Model](concepts/overview.md)
+- [Architecture Overview (C4 L1 & L2)](architecture/overview.md)
 
 ---
 
-**Writespace Engineering Documentation**
-
-_Understanding the system. Documenting the decisions. Building for maintainability._
+_Last verified against: v1.0.0 (12bc4d7, documentation branch, 2026-11-17)_
