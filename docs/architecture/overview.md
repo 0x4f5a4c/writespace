@@ -1,128 +1,124 @@
-![Writespace Architecture — system design, structure and how everything fits together](../assets/banners/architecture-overview.png)
+---
+description: C4 Level 1 System Context and Level 2 Container architecture for the Writespace backend platform.
+---
 
-# Writespace Backend Architecture
+# Architecture Overview (C4 L1 & L2)
 
-## Purpose
+> **Purpose:** Illustrate Writespace's external system boundaries (C4 Level 1) and internal runtime containers and data stores (C4 Level 2).
+> **Audience:** Internal backend developers, client integrators, and operations maintainers.
+> **Prerequisites:** Read [System Mental Model](../concepts/overview.md).
 
-This document gives a high-level view of the Writespace backend: its main modules, the path a request takes through the application, how content is represented, and where background processing fits in.
+## Overview
 
-It is an entry point to the more focused documents in `docs/`. It intentionally stays at system level; detailed table definitions and module-specific flows belong in their respective documents.
+Writespace (`writespace-backend`) is architected as a **single-process modular monolith** written in TypeScript on Node.js 24 (`Dockerfile`, `src/server.ts`). A single runtime process hosts the Express 5 REST API (`/api/v1`), the authenticated Socket.IO real-time notification server, the BullMQ queue workers (`emailWorker`, `mediaWorker`, `notificationEventsWorker`, `notificationDeliveryEventsWorker`), and the scheduled PostgreSQL polling loops (`outboxDispatcherWorker`, `notificationReconciliationWorker`).
 
-## Architecture at a glance
+State is persisted across two backing stores: **PostgreSQL 18** (relational domain data, sessions, transactional outbox, and notification leases) and **Redis 7** (BullMQ job queues, IP and email rate-limit counters, OAuth2 state bindings, and pending registration OTPs).
 
-Writespace is organized as a modular backend application. The application has a shared HTTP entry point and separates business responsibilities into domain modules such as authentication, users, Posts, Articles, interactions, and notifications. Shared infrastructure provides database access, middleware, queues, workers, and integrations used by those modules.
+## C4 Level 1 — System context
 
-The main architectural building blocks are:
+At the system context level, the Writespace backend serves the first-party Writespace web and native client (`CLIENT_URL`) and responds to social-media crawlers requesting Open Graph previews, while integrating with Cloudinary, an SMTP relay, and Google/GitHub OAuth2 providers.
 
-| Building block                  | Responsibility                                                                                                                 |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| HTTP application and routes     | Accept requests and direct them to the relevant module.                                                                        |
-| Middleware                      | Handle cross-cutting request concerns such as authentication, validation, rate limiting, uploads, logging, and error handling. |
-| Controllers                     | Translate HTTP requests into module operations and shape HTTP responses.                                                       |
-| Services and domain logic       | Coordinate use cases and enforce application or domain rules.                                                                  |
-| Repositories and Drizzle schema | Read and write persisted application data.                                                                                     |
-| PostgreSQL                      | Store users, content, interactions, notifications, and related records.                                                        |
-| Redis and BullMQ                | Provide queue infrastructure for asynchronous jobs.                                                                            |
-| Workers                         | Process queued work outside the synchronous request path.                                                                      |
-
-## High-level request flow
-
-A typical synchronous API request moves through the HTTP layer and into the relevant module. The exact implementation can vary by use case, but the intended separation is:
+**Diagram: C4 Level 1 System Context**
 
 ```mermaid
-flowchart TD
-    A[Client] --> B[HTTP route]
-    B --> C[Middleware]
-    C --> D[Controller]
-    D --> E[Module service]
-    E --> F[Repository / data access]
-    F --> G[Drizzle ORM]
-    G --> H[(PostgreSQL)]
-    E --> I[HTTP response]
-    I --> A
+flowchart TB
+  Client["Writespace First-Party Client (Web Browser & Native App)"]
+  Crawlers["Social Media Crawlers (Twitterbot, LinkedInBot, Slackbot)"]
+  WS["Writespace Backend (Node.js 24 / Express 5 / Socket.IO / BullMQ)"]
+  Cloudinary["Cloudinary API (Image Storage & Asset Cleanup)"]
+  SMTP["SMTP Server (Transactional & Security Alert Emails)"]
+  Google["Google OAuth 2.0 (Identity Provider)"]
+  GitHub["GitHub OAuth 2.0 (Identity Provider)"]
+  JsDelivr["jsDelivr CDN / Avatar APIs (Inter Font & Default Avatars)"]
+
+  Client -->|"HTTPS REST (/api/v1) & WSS (Socket.IO)"| WS
+  Crawlers -->|"GET /post/:id, /profile/:username, /api/v1/*/preview"| WS
+  WS -->|"Stream Uploads & Destroy Assets"| Cloudinary
+  WS -->|"STARTTLS / TLS (Port 587 / 465)"| SMTP
+  WS <-->|"OAuth 2.0 Authorization Code Flow"| Google
+  WS <-->|"OAuth 2.0 Authorization Code Flow"| GitHub
+  WS -->|"Fetch Inter-SemiBold.otf & Avatar PNGs"| JsDelivr
 ```
 
-Middleware is responsible for cross-cutting concerns; controllers should remain thin and delegate application work to services. Data access is handled through the database layer rather than being duplicated across HTTP handlers.
+## External actors & integrations
 
-## Backend modules
+| Actor / External System          | Direction     | Protocol / Auth                                                                                                                     | Source Implementation                                                                                           |
+| :------------------------------- | :------------ | :---------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------- |
+| Writespace Web / Native Client   | Inbound       | HTTPS REST (`/api/v1/*`) + WSS Socket.IO (`handshake.auth.token`)                                                                   | `src/app.ts`, `src/routes/index.ts`, `src/modules/notification/realtime/notification-socket.server.ts`          |
+| Social Media Crawlers            | Inbound       | HTTP `GET /post/:id`, `GET /profile/:username`, `GET /api/v1/posts/public/:id/preview`, `GET /api/v1/articles/public/:slug/preview` | `src/shared/middlewares/bot-interceptor.middleware.ts`, `post-preview.service.ts`, `article-preview.service.ts` |
+| Cloudinary                       | Outbound      | HTTPS (`cloudinary.v2` SDK with `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET`)                                                     | `src/shared/middlewares/upload.middleware.ts`, `src/shared/queues/media.worker.ts`                              |
+| SMTP Server                      | Outbound      | SMTP with `requireTLS: true` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`)                                                   | `src/shared/infra/mailer.ts`, `src/shared/queues/email.worker.ts`, `notification-email.handler.ts`              |
+| Google & GitHub OAuth 2.0        | Bidirectional | OAuth 2.0 redirect + callback (`/api/v1/auth/google/callback`, `/api/v1/auth/github/callback`) with Redis state store               | `src/modules/auth/auth.utils.ts`, `src/modules/auth/oauth-state.store.ts`                                       |
+| jsDelivr / DiceBear / UI-Avatars | Outbound      | HTTPS `fetch` for `Inter-SemiBold.otf` (cached in memory) and avatar PNG rendering in Satori                                        | `src/shared/utils/og-generator.ts`                                                                              |
 
-The main business modules are grouped under `src/modules/`.
+## C4 Level 2 — Container architecture
 
-| Module         | Responsibility                                                                     |
-| -------------- | ---------------------------------------------------------------------------------- |
-| `auth`         | Authentication-related operations and request flows.                               |
-| `users`        | User-facing account operations and user data management.                           |
-| `posts`        | Post-specific content behavior, lifecycle, media, queries, and previews.           |
-| `articles`     | Article-specific content behavior, lifecycle, slugs, media, queries, and previews. |
-| `interactions` | Shared reactions, comments, saves, shares, follows, and interaction events.        |
-| `notification` | Notification-related application behavior.                                         |
+Within the Writespace boundary, the Node.js application process coordinates synchronous HTTP/WebSocket handling and asynchronous background workers over PostgreSQL 18 and Redis 7.
 
-The modules are separated by responsibility, but they are part of the same backend application. Shared behavior is placed in common infrastructure or shared services rather than copied into each module.
-
-## Shared content model
-
-Posts and Articles are different content types, but both participate in common platform capabilities. The database therefore uses `content_items` as the shared identity for content.
-
-At a high level:
-
-- `content_items` holds common content identity and lifecycle metadata, including the content type and author.
-- `posts` stores Post-specific fields and references its content item.
-- `articles` stores Article-specific fields and references its content item.
-- Generic interaction records reference `content_item_id`, allowing the same interaction model to apply to either content type.
-- Comments also reference the shared content identity; comment reactions remain a separate interaction on comments.
+**Diagram: C4 Level 2 Container Architecture**
 
 ```mermaid
-erDiagram
-    USERS ||--o{ CONTENT_ITEMS : authors
-    CONTENT_ITEMS ||--o| POSTS : has_post_details
-    CONTENT_ITEMS ||--o| ARTICLES : has_article_details
-    CONTENT_ITEMS ||--o{ CONTENT_REACTIONS : receives
-    CONTENT_ITEMS ||--o{ CONTENT_SAVES : can_be_saved
-    CONTENT_ITEMS ||--o{ CONTENT_SHARES : can_be_shared
-    CONTENT_ITEMS ||--o{ COMMENTS : has
-    COMMENTS ||--o{ COMMENT_REACTIONS : receives
+flowchart TB
+  Client["Writespace Client (CLIENT_URL)"]
+
+  subgraph Backend["Writespace Node.js Process (src/server.ts)"]
+    HTTP["Express 5 HTTP Application (src/app.ts)"]
+    WS["Socket.IO Realtime Server (notification-socket.server.ts)"]
+    Disp["Outbox Dispatcher & Reconciliation Workers (Polling Loops)"]
+    NotifW["Notification Event & Delivery Workers (BullMQ Consumers)"]
+    InfraW["Email & Media Cleanup Workers (BullMQ Consumers)"]
+    AI["AI (v2, not documented)"]
+  end
+
+  subgraph DataStores["Persistence & Broker Containers"]
+    PG[("PostgreSQL 18 (28 Domain, Session & Outbox Tables)")]
+    Redis[("Redis 7 (BullMQ Queues, Rate Limits, OAuth State, OTPs)")]
+  end
+
+  Client -->|"REST /api/v1"| HTTP
+  Client <-->|"WSS Room user:<id>"| WS
+  HTTP -.->|"Mounts /api/v1/ai/*"| AI
+  HTTP -->|"Drizzle ORM Transactions"| PG
+  HTTP -->|"Rate Limits, OAuth State, Registration OTP, Queues"| Redis
+  WS -->|"Session Validation"| PG
+  Disp -->|"Claim Outbox & Reconcile Deliveries"| PG
+  Disp -->|"Enqueue Event Jobs & Inspect BullMQ"| Redis
+  NotifW <-->|"Consume Jobs / Move to Delayed"| Redis
+  NotifW -->|"Process Events, Leases & Attempts"| PG
+  NotifW -->|"Emit to Room user:<id>"| WS
+  InfraW <-->|"Consume email-queue & media-cleanup"| Redis
 ```
 
-This is a conceptual relationship diagram. The database schema and its foreign-key details are documented separately in `database/schema.md`.
+## Container breakdown
 
-## Background processing
+| Logical Container                              | Entry Point / Location                                                                                     | Technology                                                               | Responsibilities                                                                                                                                                                |
+| :--------------------------------------------- | :--------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Express 5 HTTP Application**                 | `src/app.ts`, `src/routes/index.ts`                                                                        | Express `^5.2.1`, Helmet, CORS, Passport, Multer, Zod                    | Serves `/health`, `/uploads`, crawler Open Graph HTML, and all first-party `/api/v1/*` REST endpoints.                                                                          |
+| **Socket.IO Realtime Server**                  | `src/modules/notification/realtime/notification-socket.server.ts`                                          | `socket.io` `^4.8.4`                                                     | Authenticates WebSocket handshakes (HS256 JWT + active session check), joins sockets to `user:<id>`, and emits `notification.*` events.                                         |
+| **Outbox Dispatcher & Reconciliation Workers** | `src/modules/notification/workers/outbox-dispatcher.worker.ts`, `notification-reconciliation.worker.ts`    | Custom `setTimeout` polling loops                                        | Polls `outbox_events` (`1000ms` default) to enqueue BullMQ jobs, and polls `notification_deliveries` (`15000ms` default) to repair missing/failed jobs and expire stale leases. |
+| **Notification Event & Delivery Workers**      | `src/modules/notification/workers/notification-events.worker.ts`, `notification-delivery-events.worker.ts` | BullMQ `^5.66.4` Worker                                                  | Consumes `notification-events-queue` and `notification-delivery-events-queue` (concurrency `10` default) to build inbox items and execute realtime/email deliveries.            |
+| **Email & Media Cleanup Workers**              | `src/shared/queues/email.worker.ts`, `media.worker.ts`                                                     | BullMQ `^5.66.4` Worker                                                  | Consumes `email-queue` (transactional auth/account emails, concurrency `5`) and `media-cleanup` (Cloudinary asset deletion, concurrency `5`).                                   |
+| **AI (v2, not documented)**                    | `src/modules/ai/`, `src/shared/ai/`                                                                        | `@google/genai` `^2.27.0`                                                | Experimental v2 post-assistant feature; out of scope for v1 documentation (see [AI Integration (Gemini) — Coming in v2](../modules/ai.md)).                                     |
+| **PostgreSQL 18**                              | `docker-compose.yml` (`postgres:18-alpine`), `src/db/index.ts`                                             | PostgreSQL 18 + `pg` Pool (min=2, max=10) + Drizzle ORM                  | Primary relational store for all 28 application tables and `drizzle.__drizzle_migrations`.                                                                                      |
+| **Redis 7**                                    | `docker-compose.yml` (`redis:7-alpine`), `src/config/redis.ts`, `src/config/bullmq.ts`                     | Redis 7 (`--appendonly yes`), `redis` `^5.10.0` + `ioredis` (via BullMQ) | Stores BullMQ queues, `rate-limit-redis` counters (`rl:*`), OAuth states (`oauth:state:*`), and registration OTPs (`auth:register:*`).                                          |
 
-Not every operation needs to complete within the lifetime of an HTTP request. Writespace uses BullMQ with Redis-backed queues and dedicated workers for background work.
+## Key decisions & rationale
 
-The current codebase contains queue and worker components for email, media, and notifications. Queue producers add jobs; workers process those jobs independently from the request handler that initiated them.
+- **Co-locating workers and HTTP server in `src/server.ts`:** Running the HTTP server, Socket.IO server, and background workers in one Node.js process allows `NotificationRealtimeHandler` (`src/modules/notification/handlers/notification-realtime.handler.ts`) to call `getNotificationSocketServer().to(recipientRoom).emit(...)` directly in memory without requiring a Redis Socket.IO adapter in the single-VM Path A deployment.
+- **Two Redis client libraries (`redis` v5 and `ioredis` v5):** Application code (`src/config/redis.ts`, `rate-limit.middleware.ts`, `oauth-state.store.ts`, `auth.service.ts`) uses the official `redis` (`^5.10.0`) client, while BullMQ (`^5.66.4`) internally uses `ioredis` configured via `bullmqRedisConnection` in `src/config/bullmq.ts`. Both parse the same `env.REDIS_URL` and `env.REDIS_PASSWORD`.
 
-```mermaid
-flowchart LR
-    A[Application module] --> B[Queue producer]
-    B --> C[(Redis / BullMQ)]
-    C --> D[Background worker]
-    D --> E[Job handler or external integration]
-```
+## Gotchas & edge cases
 
-The exact job payloads, retry behavior, idempotency requirements, and failure handling should be documented with each queue in `operations/background-jobs.md`.
+- **In-memory Socket.IO instance coupling:** Because `getNotificationSocketServer()` (`src/modules/notification/realtime/notification-socket.server.ts`) returns the process-local `activeSocketServer` singleton, `notificationDeliveryEventsWorker` must run in the same Node.js process as the Socket.IO server (or a `@socket.io/redis-adapter` must be added before splitting workers into separate containers).
+- **Ordered LIFO shutdown in `src/server.ts`:** During `gracefulShutdown`, `outboxDispatcherWorker` and `notificationReconciliationWorker` are stopped before `notificationEventsWorker` and `notificationDeliveryEventsWorker` (achieved via `workers.unshift(...)` in `src/server.ts`), which in turn close before the BullMQ Queue instances, Redis connection, and PostgreSQL pool.
 
-## Shared infrastructure
+## Related
 
-The `src/shared/` and `src/config/` areas contain infrastructure used by multiple modules. This includes middleware, queue and worker implementations, upload handling, logging, validation, and application configuration.
+- [Component Breakdown (C4 L3)](components.md)
+- [Request & Event Data Flow](data-flow.md)
+- [Technology Stack & Rationale](tech-stack.md)
+- [Deployment Topology (Path A)](deployment-topology.md)
 
-The database schema is maintained under `src/db/schema/` and is configured through Drizzle Kit. PostgreSQL is the persistent data store; Redis is used by the BullMQ job infrastructure.
+---
 
-## Design principles
-
-The current structure follows a few practical principles:
-
-1. **Separate shared identity from type-specific data.** Posts and Articles share a content identity while retaining their own fields and domain rules.
-2. **Reuse common interactions.** Reactions, saves, shares, and comments operate against the shared content identity where appropriate.
-3. **Keep responsibilities focused.** Controllers handle HTTP concerns; services coordinate use cases; repositories handle persistence.
-4. **Move suitable work out of the request path.** Background workers process queued jobs independently.
-5. **Keep documentation aligned with the code.** A documented feature should be marked as implemented only when the corresponding behavior exists in the repository.
-
-## Related documentation
-
-- [Content model](content-model.md) — detailed content identity and Post/Article relationships.
-- [Database schema](../database/schema.md) — tables, relations, indexes, and constraints.
-- [Posts and Articles](../modules/posts-and-articles.md) — content module behavior.
-- [Interactions](../modules/interactions.md) — reactions, comments, saves, and shares.
-- [Background jobs](../operations/background-jobs.md) — queues and workers.
-
-Some linked documents are planned and will be added as the documentation set is completed.
+_Last verified against: v1.0.0 (12bc4d7, documentation branch, 2026-11-17)_
